@@ -1,0 +1,6 @@
+openai>=1.0.0
+psutil>=6.1.0
+rich>=13.0.0
+tqdm>=4.66.0
+line-profiler>=4.0.0
+coverage>=7.0.0
