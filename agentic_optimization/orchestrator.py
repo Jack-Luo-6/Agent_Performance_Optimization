@@ -1,14 +1,16 @@
 """
-Performance Optimization Architecture - Orchestrator (Refactored & Fixed)
-Co-evolution of code optimization and workload stress testing
+Performance Optimization Architecture - Orchestrator (Diverse Workload Version)
+Co-evolution of code optimization with DIVERSE workload exploration
 
-FIXES:
-1. Optimized code must beat baseline on BOTH baseline workload AND current workload
-2. Correctness only needs to match baseline (not necessarily perfect)
-3. Ultimate success measured by baseline workload improvement
-4. First run excluded from baseline (warmup/cache)
-5. NEW: When Mini-SWE-Agent succeeds, skip patch application (already applied)
-6. NEW: WorkloadGenerator now receives and analyzes baseline workload
+NEW ARCHITECTURE:
+Phase 1: Optimize on ORIGINAL workload (N iterations)
+Phase 2: Generate DIVERSE workloads (agent decides how many) using ConcoLLMic-inspired strategy
+Phase 3: For each diverse workload, optimize N iterations (always validating against original baseline)
+
+ConcoLLMic-Inspired Strategy:
+- Static CFG analysis + heuristic scoring for path prioritization
+- Iterative feedback loop (execute → update scores → repeat)
+- Target deep/complex/unexplored paths systematically
 """
 
 import json
@@ -21,7 +23,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from tools.profiler import Profiler
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -29,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from opencode.repo import OpenCodeRepo
 from mcp.server import MCPServer
 from agents.optimizer_agent import CodeOptimizer
-from agents.workload_agent import WorkloadGenerator
+from agents.workload_agent import DiverseWorkloadGenerator  # NEW
 from tools.detailed_logger import DetailedLogger
 
 logging.basicConfig(
@@ -56,25 +58,14 @@ class RunMetrics:
     correctness_details: str = ""
     
     def is_better_than(self, other: 'RunMetrics', threshold: float = 0.05) -> bool:
-        """
-        Check if significantly better (faster)
-        
-        Args:
-            other: Baseline metrics to compare against
-            threshold: Minimum improvement ratio (default 5%)
-        
-        Returns:
-            True if this is at least threshold% faster than other
-        """
-        # Don't consider improvements if success rate is too low
+        """Check if significantly better (faster)"""
         if self.success_rate < 0.95:
             return False
-        
         improvement = (other.execution_time - self.execution_time) / other.execution_time
         return improvement > threshold
     
     def is_worse_than(self, other: 'RunMetrics', threshold: float = 0.05) -> bool:
-        """Check if significantly worse (slower) - used for workload validation"""
+        """Check if significantly worse (slower)"""
         degradation = (self.execution_time - other.execution_time) / other.execution_time
         return degradation > threshold
     
@@ -84,18 +75,43 @@ class RunMetrics:
 
 
 @dataclass
+class WorkloadInfo:
+    """Information about a workload"""
+    name: str  # e.g., "original", "diverse_1", "diverse_2"
+    code: str
+    description: str  # Agent's reasoning for this workload
+    is_original: bool = False
+
+
+@dataclass
+class OptimizationPhaseResult:
+    """Results from optimizing on one workload for N iterations"""
+    workload_name: str
+    iterations_completed: int
+    best_metrics_on_workload: Optional[RunMetrics]  # Best on THIS workload
+    best_metrics_on_original: Optional[RunMetrics]  # Best on ORIGINAL workload
+    final_patch: Optional[str]
+    baseline_improvement_percent: float = 0.0  # vs original baseline
+    timestamp: str = None
+    
+    def __post_init__(self):
+        if not self.timestamp:
+            self.timestamp = datetime.now().isoformat()
+
+
+@dataclass
 class CycleResult:
-    """Results from one full cycle"""
+    """Results from one full cycle (keeping for compatibility)"""
     iteration: int
     baseline_workload_code: str
     current_workload_code: str
     optimized_code_patch: Optional[str]
     baseline_metrics: RunMetrics
-    optimized_on_baseline_metrics: Optional[RunMetrics]  # Performance on baseline workload
-    optimized_on_current_metrics: Optional[RunMetrics]   # Performance on current workload
+    optimized_on_baseline_metrics: Optional[RunMetrics]
+    optimized_on_current_metrics: Optional[RunMetrics]
     workload_accepted: bool
     code_accepted: bool
-    baseline_improvement_percent: float = 0.0  # THE key metric
+    baseline_improvement_percent: float = 0.0
     timestamp: str = None
     
     def __post_init__(self):
@@ -114,6 +130,8 @@ class Database:
     
     def _init_schema(self):
         cursor = self.conn.cursor()
+        
+        # Original table (keep for compatibility)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cycles (
                 cycle_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +148,32 @@ class Database:
                 timestamp TEXT
             )
         """)
+        
+        # New table for optimization phases
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS optimization_phases (
+                phase_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workload_name TEXT,
+                iterations_completed INTEGER,
+                best_metrics_on_workload TEXT,
+                best_metrics_on_original TEXT,
+                final_patch TEXT,
+                baseline_improvement_percent REAL,
+                timestamp TEXT
+            )
+        """)
+        
+        # New table for diverse workloads
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS diverse_workloads (
+                workload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                code TEXT,
+                description TEXT,
+                timestamp TEXT
+            )
+        """)
+        
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +187,7 @@ class Database:
         self.conn.commit()
     
     def save_cycle(self, cycle: CycleResult) -> int:
+        """Keep for compatibility"""
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO cycles 
@@ -167,6 +212,36 @@ class Database:
         self.conn.commit()
         return cursor.lastrowid
     
+    def save_optimization_phase(self, phase: OptimizationPhaseResult) -> int:
+        """Save optimization phase result"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO optimization_phases
+            (workload_name, iterations_completed, best_metrics_on_workload,
+             best_metrics_on_original, final_patch, baseline_improvement_percent, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            phase.workload_name,
+            phase.iterations_completed,
+            json.dumps(asdict(phase.best_metrics_on_workload)) if phase.best_metrics_on_workload else None,
+            json.dumps(asdict(phase.best_metrics_on_original)) if phase.best_metrics_on_original else None,
+            phase.final_patch,
+            phase.baseline_improvement_percent,
+            phase.timestamp
+        ))
+        self.conn.commit()
+        return cursor.lastrowid
+    
+    def save_diverse_workload(self, workload: WorkloadInfo) -> int:
+        """Save diverse workload"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO diverse_workloads (name, code, description, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (workload.name, workload.code, workload.description, datetime.now().isoformat()))
+        self.conn.commit()
+        return cursor.lastrowid
+    
     def log(self, iteration: int, phase: str, message: str, details: str = ""):
         cursor = self.conn.cursor()
         cursor.execute("""
@@ -180,15 +255,14 @@ class Database:
 
 
 class Orchestrator:
-    """Main orchestration loop - co-evolving code and workloads"""
+    """Main orchestration loop - diverse workload exploration"""
     
     def __init__(self, 
                  target_repo: str,
                  baseline_workload: str,
                  correctness_test_dir: str,
-                 max_iterations: int = 3,
+                 iterations_per_workload: int = 3,
                  max_code_retries: int = 3,
-                 max_workload_retries: int = 3,
                  model: str = "gpt-4o"):
         """
         Initialize orchestrator
@@ -197,9 +271,8 @@ class Orchestrator:
             target_repo: Path to code repository
             baseline_workload: Path to baseline stress test workload
             correctness_test_dir: Path to correctness test script directory
-            max_iterations: Number of co-evolution cycles
-            max_code_retries: Max retries for code optimizer
-            max_workload_retries: Max retries for workload generator
+            iterations_per_workload: Number of optimization iterations per workload
+            max_code_retries: Max retries for code optimizer per iteration
             model: LLM model name
         """
         # Install dependencies first
@@ -208,9 +281,8 @@ class Orchestrator:
         self.target_repo_path = Path(target_repo)
         self.baseline_workload_path = Path(baseline_workload)
         self.correctness_test_dir = Path(correctness_test_dir)
-        self.max_iterations = max_iterations
+        self.iterations_per_workload = iterations_per_workload
         self.max_code_retries = max_code_retries
-        self.max_workload_retries = max_workload_retries
         self.model = model
         
         # Infrastructure
@@ -226,34 +298,41 @@ class Orchestrator:
             'repo': target_repo,
             'baseline_workload': baseline_workload,
             'correctness_tests': correctness_test_dir,
-            'iterations': max_iterations,
+            'iterations_per_workload': iterations_per_workload,
             'code_retries': max_code_retries,
-            'workload_retries': max_workload_retries,
             'model': model
         }
         self.detailed_log = DetailedLogger(repo_name, cmd_args)
         
         # State tracking
         self.baseline_workload_code = self.baseline_workload_path.read_text()
-        self.baseline_metrics = None  # Set during initialization - THE reference point
-        self.baseline_correctness_pass = None  # Baseline correctness status
-        self.current_workload_code = self.baseline_workload_code
-        self.current_best_on_baseline = None  # Best performance on BASELINE workload
-        self.current_best_on_current = None   # Best performance on CURRENT workload
+        self.baseline_metrics = None  # IMMUTABLE - established in Phase 0
+        self.baseline_correctness_pass = None
+        
+        # NEW: Track all workloads
+        self.workloads: List[WorkloadInfo] = []
+        
+        # NEW: Track optimization results per workload
+        self.optimization_results: Dict[str, OptimizationPhaseResult] = {}
+        
+        # NEW: Track fastest times per workload
+        self.fastest_original = None  # Fastest time on original workload (updates)
+        self.workload_baselines: Dict[str, RunMetrics] = {}  # Baseline per diverse workload
+        self.workload_fastest: Dict[str, RunMetrics] = {}  # Fastest per diverse workload
         
         logger.info("="*80)
-        logger.info("🚀 ORCHESTRATOR INITIALIZED")
+        logger.info("🚀 ORCHESTRATOR INITIALIZED (DIVERSE WORKLOAD MODE)")
         logger.info("="*80)
         logger.info(f"Target repo: {self.target_repo_path}")
         logger.info(f"Baseline workload: {self.baseline_workload_path}")
         logger.info(f"Correctness tests: {self.correctness_test_dir}")
         logger.info(f"Model: {model}")
-        logger.info(f"Max code retries: {max_code_retries}")
-        logger.info(f"Max workload retries: {max_workload_retries}")
+        logger.info(f"Iterations per workload: {iterations_per_workload}")
+        logger.info(f"Max code retries per iteration: {max_code_retries}")
         logger.info("="*80)
     
     def _install_dependencies(self):
-        """Reinstall dependencies from requirements.txt (uninstall first, then install)"""
+        """Reinstall dependencies from requirements.txt"""
         requirements_file = Path("requirements.txt")
         
         if not requirements_file.exists():
@@ -263,21 +342,15 @@ class Orchestrator:
         logger.info("📦 Reinstalling dependencies from requirements.txt...")
         
         try:
-            # Force reinstall all packages listed in requirements.txt
             result = subprocess.run(
                 [sys.executable, '-m', 'pip', 'install', '--force-reinstall', '-r', 'requirements.txt'],
                 capture_output=True,
                 text=True,
-                timeout=600  # increased timeout for reinstall
+                timeout=600
             )
             
             if result.returncode == 0:
                 logger.info("✓ Dependencies reinstalled successfully")
-                # Log key installed packages
-                installed = [line.strip() for line in result.stdout.split('\n') 
-                            if 'Successfully installed' in line or 'Requirement already satisfied' in line]
-                if installed:
-                    logger.info(f"   {installed[0][:100]}...")
             else:
                 logger.error(f"❌ Failed to reinstall dependencies: {result.stderr[:500]}")
                 logger.warning("⚠️  Continuing anyway, but some features may not work")
@@ -288,29 +361,168 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"❌ Error reinstalling dependencies: {e}")
             logger.warning("⚠️  Continuing anyway, but some features may not work")
-
+    
+    def _create_git_checkpoint(self, name: str) -> Optional[str]:
+        """
+        Create git checkpoint and return commit hash
+        
+        Args:
+            name: Checkpoint name
+        
+        Returns:
+            Commit hash if successful, None otherwise
+        """
+        try:
+            # Stage all changes
+            subprocess.run(
+                ['git', 'add', '-A'],
+                cwd=self.target_repo_path,
+                capture_output=True,
+                check=True
+            )
+            
+            # Commit
+            subprocess.run(
+                ['git', 'commit', '-m', f'checkpoint_{name}'],
+                cwd=self.target_repo_path,
+                capture_output=True,
+                check=True
+            )
+            
+            # Get commit hash
+            result = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                cwd=self.target_repo_path,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            commit_hash = result.stdout.strip()
+            logger.info(f"   📌 Checkpoint created: {name} ({commit_hash[:8]})")
+            return commit_hash
+            
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"   ⚠️  Failed to create checkpoint: {e}")
+            return None
+    
+    def _revert_to_checkpoint(self, commit_hash: str) -> bool:
+        """
+        Revert to git checkpoint
+        
+        Args:
+            commit_hash: Commit hash to revert to
+        
+        Returns:
+            True if successful
+        """
+        try:
+            subprocess.run(
+                ['git', 'reset', '--hard', commit_hash],
+                cwd=self.target_repo_path,
+                capture_output=True,
+                check=True
+            )
+            
+            logger.info(f"   ↩️  Reverted to checkpoint ({commit_hash[:8]})")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"   ❌ Failed to revert to checkpoint: {e}")
+            return False
     
     def run(self):
-        """Main execution loop"""
+        """Main execution loop - NEW ARCHITECTURE"""
         try:
-            # Phase 0: Establish baseline
+            # ===== PHASE 0: Establish Baseline =====
             if not self._establish_baseline():
                 logger.error("❌ Failed to establish baseline")
                 return
             
-            # Phase 1-N: Co-evolution cycles
-            for iteration in range(1, self.max_iterations + 1):
+            # ===== PHASE 1: Optimize on Original Workload =====
+            logger.info(f"\n{'='*80}")
+            logger.info(f"🎯 PHASE 1: OPTIMIZE ON ORIGINAL WORKLOAD")
+            logger.info(f"{'='*80}\n")
+            
+            original_workload = WorkloadInfo(
+                name="original",
+                code=self.baseline_workload_code,
+                description="Original baseline workload",
+                is_original=True
+            )
+            self.workloads.append(original_workload)
+            
+            phase1_result = self._optimize_on_workload(
+                workload=original_workload,
+                phase_name="Phase 1"
+            )
+            
+            if not phase1_result:
+                logger.error("❌ Phase 1 failed - cannot proceed")
+                return
+            
+            self.optimization_results["original"] = phase1_result
+            
+            # ===== PHASE 2: Generate Diverse Workloads =====
+            logger.info(f"\n{'='*80}")
+            logger.info(f"🌈 PHASE 2: GENERATE DIVERSE WORKLOADS")
+            logger.info(f"{'='*80}\n")
+            
+            diverse_workloads = self._generate_diverse_workloads()
+            
+            if not diverse_workloads:
+                logger.warning("⚠️  No diverse workloads generated - ending optimization")
+                self._print_summary()
+                return
+            
+            logger.info(f"✓ Generated {len(diverse_workloads)} diverse workload(s)")
+            self.workloads.extend(diverse_workloads)
+            
+            # ===== PHASE 3: Optimize on Each Diverse Workload =====
+            for idx, workload in enumerate(diverse_workloads, 1):
                 logger.info(f"\n{'='*80}")
-                logger.info(f"🔄 CYCLE {iteration}/{self.max_iterations}")
+                logger.info(f"🔧 PHASE 3.{idx}: OPTIMIZE ON {workload.name.upper()}")
+                logger.info(f"{'='*80}")
+                logger.info(f"Description: {workload.description}")
                 logger.info(f"{'='*80}\n")
                 
-                success = self._run_cycle(iteration)
+                phase_result = self._optimize_on_workload(
+                    workload=workload,
+                    phase_name=f"Phase 3.{idx}"
+                )
                 
-                if not success:
-                    logger.warning(f"⚠️  Cycle {iteration} failed - terminating")
-                    break
+                if phase_result:
+                    self.optimization_results[workload.name] = phase_result
+                else:
+                    logger.warning(f"⚠️  Phase 3.{idx} ({workload.name}) failed - continuing with next workload")
+            
+            # ===== FINAL EVALUATION: Test on Original Workload =====
+            logger.info(f"\n{'='*80}")
+            logger.info(f"🏁 FINAL EVALUATION: ORIGINAL WORKLOAD PERFORMANCE")
+            logger.info(f"{'='*80}\n")
+            
+            final_metrics = self._run_workload_on_repo(
+                self.baseline_workload_code,
+                self.target_repo_path,
+                "final_evaluation",
+                exclude_first_run=True
+            )
+            
+            if final_metrics:
+                final_improvement = final_metrics.improvement_percent(self.baseline_metrics)
+                logger.info(f"\n📊 FINAL RESULTS:")
+                logger.info(f"   {'─'*60}")
+                logger.info(f"   Original baseline: {self.baseline_metrics.execution_time:.3f}s")
+                logger.info(f"   Final performance: {final_metrics.execution_time:.3f}s")
+                logger.info(f"   🏆 TOTAL IMPROVEMENT: {final_improvement:+.2f}%")
+                logger.info(f"   {'─'*60}\n")
                 
-                time.sleep(1)
+                # Update fastest if this is the best
+                if final_metrics.is_better_than(self.fastest_original):
+                    logger.info(f"   ✨ New record! Updating fastest_original")
+                    self.fastest_original = final_metrics
+            else:
+                logger.warning("⚠️  Final evaluation failed")
             
             self._print_summary()
             
@@ -335,7 +547,7 @@ class Orchestrator:
             self.baseline_workload_code,
             self.target_repo_path,
             "baseline_workload",
-            exclude_first_run=True  # NEW: Exclude warmup run
+            exclude_first_run=True
         )
         
         if not baseline_perf:
@@ -351,14 +563,15 @@ class Orchestrator:
         baseline_perf.correctness_pass = correctness_pass
         baseline_perf.correctness_details = correctness_details
         
-        # Store baseline state
+        # Store baseline state (IMMUTABLE)
         self.baseline_metrics = baseline_perf
         self.baseline_correctness_pass = correctness_pass
-        self.current_best_on_baseline = baseline_perf
-        self.current_best_on_current = baseline_perf  # Initially same
+        
+        # Initialize fastest metrics (MUTABLE - updates with improvements)
+        self.fastest_original = baseline_perf
         
         logger.info("\n" + "="*80)
-        logger.info("📊 BASELINE ESTABLISHED")
+        logger.info("📊 BASELINE ESTABLISHED (IMMUTABLE REFERENCE)")
         logger.info("="*80)
         logger.info(f"⏱️  Execution time: {baseline_perf.execution_time:.3f}s (warmup excluded)")
         logger.info(f"📈 P50: {baseline_perf.p50_time:.3f}s | P99: {baseline_perf.p99_time:.3f}s")
@@ -388,21 +601,392 @@ class Orchestrator:
         
         self.db.log(0, "baseline", "Baseline established", json.dumps(asdict(baseline_perf)))
         
-        # Note: We don't require baseline to pass correctness - we just track it
         return True
     
-    def _is_mini_swe_patch(self, patch: str) -> bool:
+    def _optimize_on_workload(self, workload: WorkloadInfo, phase_name: str) -> Optional[OptimizationPhaseResult]:
         """
-        Check if patch is a Mini-SWE-Agent success marker (not a real patch)
+        Optimize code for N iterations on a single workload
         
-        Mini-SWE-Agent applies changes directly, so it returns a marker like:
-        # Mini-SWE-Agent made modifications
-        # See trajectory: /path/to/trajectory.json
+        NEW LOGIC:
+        - For original workload: baseline already exists from Phase 0
+        - For diverse workload: run once to establish baseline first
+        - Track fastest time per workload (updates on improvement)
+        - Always validate against original baseline
+        - Track if beats fastest_original (informational)
+        
+        Each iteration:
+        1. Create git checkpoint
+        2. Profile current code on this workload
+        3. Optimize code
+        4. Test on THIS workload (must beat fastest for this workload)
+        5. Test on ORIGINAL workload (must beat baseline_original)
+        6. Check if beats fastest_original (informational, update if so)
+        7. Validate correctness
+        8. If fail: revert to checkpoint
+        9. If success: update fastest metrics, commit
+        
+        Returns:
+            OptimizationPhaseResult if successful, None otherwise
         """
+        logger.info(f"Starting {phase_name}: {self.iterations_per_workload} iterations on '{workload.name}'")
+        
+        # ===== ESTABLISH BASELINE FOR THIS WORKLOAD =====
+        if not workload.is_original:
+            logger.info(f"\n🎯 Establishing baseline for '{workload.name}'...")
+            
+            diverse_baseline = self._run_workload_on_repo(
+                workload.code,
+                self.target_repo_path,
+                f"{workload.name}_baseline",
+                exclude_first_run=False
+            )
+            
+            if not diverse_baseline:
+                logger.error(f"❌ Failed to establish baseline for '{workload.name}'")
+                return None
+            
+            self.workload_baselines[workload.name] = diverse_baseline
+            self.workload_fastest[workload.name] = diverse_baseline
+            
+            logger.info(f"✓ Baseline for '{workload.name}': {diverse_baseline.execution_time:.3f}s")
+        else:
+            # Original workload uses Phase 0 baseline
+            self.workload_baselines[workload.name] = self.baseline_metrics
+            self.workload_fastest[workload.name] = self.fastest_original
+        
+        # ===== OPTIMIZATION ITERATIONS =====
+        best_on_workload = None
+        best_on_original = None
+        final_patch = None
+        iterations_completed = 0
+        
+        for iteration in range(1, self.iterations_per_workload + 1):
+            logger.info(f"\n{'─'*80}")
+            logger.info(f"🔄 {phase_name} - Iteration {iteration}/{self.iterations_per_workload}")
+            logger.info(f"{'─'*80}\n")
+            
+            # Log iteration start (creates new log file)
+            self.detailed_log.log_iteration_start(iteration, self.iterations_per_workload, workload.name)
+            
+            # Create git checkpoint BEFORE optimization
+            checkpoint_hash = self._create_git_checkpoint(f"{workload.name}_iter{iteration}_start")
+            
+            if not checkpoint_hash:
+                logger.warning("⚠️  No git checkpoint created - continuing anyway")
+            
+            # Profile current code on THIS workload
+            logger.info(f"🔬 Profiling current code on '{workload.name}'...")
+            profiling_report = self.profiler.profile_workload(
+                workload.code,
+                f"{workload.name}_iter{iteration}"
+            )
+            
+            if profiling_report:
+                logger.info(f"📊 Profiling complete:")
+                logger.info(f"   Functions: {len(profiling_report.function_profiles)}")
+                logger.info(f"   Hot lines: {len(profiling_report.line_profiles)}")
+                logger.info(f"   Peak memory: {profiling_report.memory_profile.peak_mb:.1f} MB")
+                logger.info(f"   Coverage: {profiling_report.coverage.overall_coverage_percent:.1f}%")
+            else:
+                logger.warning("⚠️  Profiling failed, proceeding without profiling data")
+            
+            # Optimization with retries
+            optimized_patch = None
+            optimized_on_workload_metrics = None
+            optimized_on_original_metrics = None
+            previous_patch_error = None
+            
+            for code_attempt in range(1, self.max_code_retries + 1):
+                logger.info(f"\n🔄 Code optimization attempt {code_attempt}/{self.max_code_retries}")
+                
+                # Get current best metrics for this workload
+                current_best_on_workload = self.workload_fastest[workload.name]
+                
+                # Generate optimization
+                with OpenCodeRepo(str(self.target_repo_path), mode="direct") as repo:
+                    optimizer = CodeOptimizer(repo, self.mcp, model=self.model)
+                    
+                    patch = optimizer.optimize(
+                        asdict(current_best_on_workload),
+                        workload_type=workload.name,
+                        workload_code=workload.code,
+                        retry_attempt=code_attempt,
+                        previous_patch_error=previous_patch_error,
+                        profiling_report=profiling_report
+                    )
+                    
+                    if not patch:
+                        logger.warning(f"   ⚠️  No optimization generated")
+                        if code_attempt == self.max_code_retries:
+                            logger.error(f"   ❌ All optimization attempts failed for iteration {iteration}")
+                            break
+                        continue
+                    
+                    # Save patch
+                    self._save_patch(workload.name, iteration, code_attempt, patch)
+                    
+                    # Check if Mini-SWE-Agent already applied (it modifies files directly)
+                    mini_swe_applied = self._is_mini_swe_patch(patch)
+                    
+                    if mini_swe_applied:
+                        logger.info(f"   🤖 Mini-SWE-Agent already applied changes")
+                        patch_applied = True
+                    else:
+                        logger.info(f"   📝 Applying patch...")
+                        patch_applied = repo.apply_patch(patch)
+                        
+                        if not patch_applied:
+                            previous_patch_error = "Patch application failed - likely malformed diff format"
+                            logger.error(f"   ❌ Failed to apply patch")
+                            if code_attempt == self.max_code_retries:
+                                break
+                            continue
+                    
+                    previous_patch_error = None
+                    
+                    # ===== TEST 1: THIS WORKLOAD (must beat fastest for this workload) =====
+                    logger.info(f"   🧪 Testing on '{workload.name}' workload...")
+                    workload_test_metrics = self._run_workload_on_repo(
+                        workload.code,
+                        repo.root,
+                        f"{workload.name}_optimized_iter{iteration}_attempt{code_attempt}",
+                        exclude_first_run=(workload.is_original)
+                    )
+                    
+                    if not workload_test_metrics:
+                        logger.error(f"   ❌ Failed to run on '{workload.name}' workload")
+                        if checkpoint_hash:
+                            self._revert_to_checkpoint(checkpoint_hash)
+                        if code_attempt == self.max_code_retries:
+                            break
+                        continue
+                    
+                    # ===== TEST 2: ORIGINAL WORKLOAD (must beat baseline_original) =====
+                    logger.info(f"   🎯 Testing on ORIGINAL workload (baseline validation)...")
+                    original_test_metrics = self._run_workload_on_repo(
+                        self.baseline_workload_code,
+                        repo.root,
+                        f"{workload.name}_on_original_iter{iteration}_attempt{code_attempt}",
+                        exclude_first_run=True
+                    )
+                    
+                    if not original_test_metrics:
+                        logger.error(f"   ❌ Failed to run on original workload")
+                        if checkpoint_hash:
+                            self._revert_to_checkpoint(checkpoint_hash)
+                        if code_attempt == self.max_code_retries:
+                            break
+                        continue
+                    
+                    # ===== TEST 3: CORRECTNESS =====
+                    logger.info(f"   ✅ Testing correctness...")
+                    correctness_pass, correctness_details = self._run_correctness_tests(repo.root)
+                    workload_test_metrics.correctness_pass = correctness_pass
+                    workload_test_metrics.correctness_details = correctness_details
+                    
+                    # ===== CALCULATE IMPROVEMENTS =====
+                    workload_improvement = workload_test_metrics.improvement_percent(current_best_on_workload)
+                    original_baseline_improvement = original_test_metrics.improvement_percent(self.baseline_metrics)
+                    
+                    # Check if beats fastest_original (informational)
+                    beats_fastest_original = original_test_metrics.is_better_than(self.fastest_original, threshold=0.0)
+                    fastest_original_improvement = original_test_metrics.improvement_percent(self.fastest_original) if beats_fastest_original else 0.0
+                    
+                    # ===== DISPLAY RESULTS =====
+                    logger.info(f"\n   📊 RESULTS:")
+                    logger.info(f"   {'─'*60}")
+                    logger.info(f"   🎯 ORIGINAL workload:")
+                    logger.info(f"      Baseline (immutable): {self.baseline_metrics.execution_time:.3f}s")
+                    logger.info(f"      Fastest so far: {self.fastest_original.execution_time:.3f}s")
+                    logger.info(f"      This optimization: {original_test_metrics.execution_time:.3f}s")
+                    logger.info(f"      vs Baseline: {original_baseline_improvement:+.2f}% {'✅ REQUIRED' if original_baseline_improvement > 5.0 else '❌ FAILED'}")
+                    if beats_fastest_original:
+                        logger.info(f"      vs Fastest: {fastest_original_improvement:+.2f}% ⭐ NEW RECORD!")
+                    else:
+                        logger.info(f"      vs Fastest: {fastest_original_improvement:+.2f}% (not a record)")
+                    logger.info(f"")
+                    logger.info(f"   🧪 '{workload.name.upper()}' workload:")
+                    logger.info(f"      Baseline: {self.workload_baselines[workload.name].execution_time:.3f}s")
+                    logger.info(f"      Fastest so far: {current_best_on_workload.execution_time:.3f}s")
+                    logger.info(f"      This optimization: {workload_test_metrics.execution_time:.3f}s")
+                    logger.info(f"      Improvement: {workload_improvement:+.2f}% {'✅ REQUIRED' if workload_improvement > 5.0 else '❌ FAILED'}")
+                    logger.info(f"")
+                    logger.info(f"   ✅ Correctness:")
+                    logger.info(f"      Baseline: {'PASS' if self.baseline_correctness_pass else 'FAIL'}")
+                    logger.info(f"      Optimized: {'PASS' if correctness_pass else 'FAIL'}")
+                    logger.info(f"      Match: {'✅ YES' if correctness_pass == self.baseline_correctness_pass else '❌ NO'}")
+                    logger.info(f"   {'─'*60}\n")
+                    
+                    # ===== VALIDATION CHECKS =====
+                    
+                    # Check 1: Must beat baseline on ORIGINAL workload (REQUIRED)
+                    if not original_test_metrics.is_better_than(self.baseline_metrics, threshold=0.05):
+                        logger.warning(f"   ⚠️  Did not beat baseline on ORIGINAL workload")
+                        logger.warning(f"       Need: >5.0% improvement | Got: {original_baseline_improvement:+.2f}%")
+                        if checkpoint_hash:
+                            self._revert_to_checkpoint(checkpoint_hash)
+                        if code_attempt == self.max_code_retries:
+                            logger.error(f"   ❌ Failed to beat baseline on original workload after all retries")
+                            break
+                        continue
+                    
+                    # Check 2: Must improve on THIS workload (REQUIRED)
+                    if not workload_test_metrics.is_better_than(current_best_on_workload, threshold=0.05):
+                        logger.warning(f"   ⚠️  Did not improve on '{workload.name}' workload")
+                        logger.warning(f"       Need: >5.0% improvement | Got: {workload_improvement:+.2f}%")
+                        if checkpoint_hash:
+                            self._revert_to_checkpoint(checkpoint_hash)
+                        if code_attempt == self.max_code_retries:
+                            logger.error(f"   ❌ Failed to improve on '{workload.name}' after all retries")
+                            break
+                        continue
+                    
+                    # Check 3: Correctness must match baseline (REQUIRED)
+                    if correctness_pass != self.baseline_correctness_pass:
+                        logger.warning(f"   ⚠️  Correctness changed from baseline")
+                        logger.warning(f"       Baseline: {'PASS' if self.baseline_correctness_pass else 'FAIL'}")
+                        logger.warning(f"       Optimized: {'PASS' if correctness_pass else 'FAIL'}")
+                        if checkpoint_hash:
+                            self._revert_to_checkpoint(checkpoint_hash)
+                        if code_attempt == self.max_code_retries:
+                            logger.error(f"   ❌ Correctness mismatch after all retries")
+                            break
+                        continue
+                    
+                    # ===== SUCCESS! =====
+                    logger.info(f"   ✅ OPTIMIZATION SUCCESSFUL!")
+                    logger.info(f"      🎯 Original baseline improvement: {original_baseline_improvement:+.2f}%")
+                    logger.info(f"      🧪 '{workload.name}' improvement: {workload_improvement:+.2f}%")
+                    if beats_fastest_original:
+                        logger.info(f"      ⭐ NEW RECORD on original workload: {fastest_original_improvement:+.2f}%")
+                    logger.info(f"      ✅ Correctness: MATCHES BASELINE")
+                    
+                    # Update metrics
+                    optimized_patch = patch
+                    optimized_on_workload_metrics = workload_test_metrics
+                    optimized_on_original_metrics = original_test_metrics
+                    
+                    # Update fastest times
+                    self.workload_fastest[workload.name] = workload_test_metrics
+                    if beats_fastest_original:
+                        logger.info(f"   ✨ Updating fastest_original: {self.fastest_original.execution_time:.3f}s → {original_test_metrics.execution_time:.3f}s")
+                        self.fastest_original = original_test_metrics
+                    
+                    # Commit successful optimization
+                    success_hash = self._create_git_checkpoint(f"{workload.name}_iter{iteration}_success")
+                    
+                    break  # Exit retry loop
+            
+            # Check if iteration succeeded
+            if not optimized_patch:
+                logger.error(f"❌ Iteration {iteration} failed after all retries")
+                # Revert to checkpoint if available
+                if checkpoint_hash:
+                    self._revert_to_checkpoint(checkpoint_hash)
+                break  # Exit iteration loop
+            
+            # Update best metrics
+            best_on_workload = optimized_on_workload_metrics
+            best_on_original = optimized_on_original_metrics
+            final_patch = optimized_patch
+            iterations_completed = iteration
+            
+            logger.info(f"✅ Iteration {iteration} complete")
+        
+        # Create phase result
+        if iterations_completed > 0:
+            phase_result = OptimizationPhaseResult(
+                workload_name=workload.name,
+                iterations_completed=iterations_completed,
+                best_metrics_on_workload=best_on_workload,
+                best_metrics_on_original=best_on_original,
+                final_patch=final_patch,
+                baseline_improvement_percent=best_on_original.improvement_percent(self.baseline_metrics) if best_on_original else 0.0
+            )
+            
+            self.db.save_optimization_phase(phase_result)
+            
+            logger.info(f"\n✅ {phase_name} COMPLETE")
+            logger.info(f"   Iterations: {iterations_completed}/{self.iterations_per_workload}")
+            logger.info(f"   Baseline improvement: {phase_result.baseline_improvement_percent:+.2f}%")
+            logger.info(f"{'='*80}\n")
+            
+            return phase_result
+        else:
+            logger.error(f"❌ {phase_name} failed - no successful iterations")
+            return None
+    
+    def _generate_diverse_workloads(self) -> List[WorkloadInfo]:
+        """
+        Generate diverse workloads using ConcoLLMic-inspired strategy
+        
+        Agent decides:
+        - How many workloads to generate
+        - What paths/patterns each workload targets
+        
+        Returns:
+            List of WorkloadInfo objects
+        """
+        logger.info("🌈 Generating diverse workloads...")
+        logger.info("   Agent will decide how many workloads to create")
+        
+        # Log to detailed logger
+        self.detailed_log.log_diverse_workload_generation_start()
+        
+        # Profile current optimized code
+        logger.info("   🔬 Profiling optimized code for diversity analysis...")
+        
+        # Use the best code from Phase 1
+        phase1_result = self.optimization_results.get("original")
+        if not phase1_result:
+            logger.error("   ❌ No Phase 1 results available")
+            return []
+        
+        profiling_report = self.profiler.profile_workload(
+            self.baseline_workload_code,
+            "diversity_analysis"
+        )
+        
+        if not profiling_report:
+            logger.warning("   ⚠️  Profiling failed - agent will work without profiling data")
+        else:
+            logger.info(f"   📊 Profiling complete:")
+            logger.info(f"      Coverage: {profiling_report.coverage.overall_coverage_percent:.1f}%")
+            logger.info(f"      Functions profiled: {len(profiling_report.function_profiles)}")
+        
+        # Generate diverse workloads
+        generator = DiverseWorkloadGenerator(self.mcp, model=self.model)
+        
+        workload_infos = generator.generate_diverse_workloads(
+            baseline_workload_code=self.baseline_workload_code,
+            target_repo_path=self.target_repo_path,
+            profiling_report=profiling_report,
+            baseline_metrics=self.baseline_metrics
+        )
+        
+        if not workload_infos:
+            logger.warning("⚠️  No diverse workloads generated")
+            return []
+        
+        # Save workloads
+        for workload in workload_infos:
+            self._save_workload(workload.name, workload.code)
+            self.db.save_diverse_workload(workload)
+        
+        # Log to detailed logger
+        self.detailed_log.log_diverse_workloads_generated(workload_infos)
+        
+        logger.info(f"✓ Generated {len(workload_infos)} diverse workload(s):")
+        for wl in workload_infos:
+            logger.info(f"   • {wl.name}: {wl.description}")
+        
+        return workload_infos
+    
+    def _is_mini_swe_patch(self, patch: str) -> bool:
+        """Check if patch is a Mini-SWE-Agent success marker"""
         if not patch:
             return False
         
-        # Check for Mini-SWE-Agent markers
         markers = [
             "Mini-SWE-Agent made modifications",
             "Mini-SWE-Agent completed",
@@ -411,385 +995,9 @@ class Orchestrator:
         
         return any(marker in patch for marker in markers)
     
-    def _run_cycle(self, iteration: int) -> bool:
-        """
-        Single co-evolution cycle
-        
-        Workflow:
-        1. Code Optimization Phase (with retries)
-           - Optimize code against current workload
-           - Test on BOTH current workload AND baseline workload
-           - Must beat baseline on BOTH workloads (key fix!)
-           - Correctness must match baseline (not necessarily perfect)
-        2. Workload Evolution Phase (with retries)
-           - Generate harder workload
-           - Validate it's actually harder (slower on optimized code)
-        
-        Success Criteria:
-        - Optimized code must be faster on baseline workload (primary metric)
-        - Optimized code must be faster on current workload (secondary metric)
-        - Correctness must match baseline correctness
-        """
-        
-        # Log iteration start
-        self.detailed_log.log_iteration_start(iteration, self.max_iterations)
-        
-        # === PHASE 1: CODE OPTIMIZATION ===
-        logger.info(f"\n{'─'*80}")
-        logger.info(f"🔧 PHASE 1: CODE OPTIMIZATION")
-        logger.info(f"{'─'*80}\n")
-        
-        optimized_code_patch = None
-        optimized_on_baseline_metrics = None
-        optimized_on_current_metrics = None
-        previous_patch_error = None
-        
-        for code_attempt in range(1, self.max_code_retries + 1):
-            # Profile current code before optimization
-            logger.info(f"   🔬 Profiling current code on workload...")
-            profiling_report = self.profiler.profile_workload(
-                self.current_workload_code,
-                f"cycle{iteration}_attempt{code_attempt}"
-            )
-            
-            if not profiling_report:
-                logger.warning("   ⚠️  Profiling failed, proceeding without profiling data")
-            else:
-                logger.info(f"   📊 Profiling complete:")
-                logger.info(f"      Functions: {len(profiling_report.function_profiles)}")
-                logger.info(f"      Hot lines: {len(profiling_report.line_profiles)}")
-                logger.info(f"      Peak memory: {profiling_report.memory_profile.peak_mb:.1f} MB")
-                logger.info(f"      Coverage: {profiling_report.coverage.overall_coverage_percent:.1f}%")
-            
-            # Log profiling results to detailed logger
-            if profiling_report:
-                self.detailed_log.log_profiling_results(profiling_report, iteration, code_attempt)
-
-            logger.info(f"\n🔄 Code optimization attempt {code_attempt}/{self.max_code_retries}")
-            
-            # Generate optimization
-            with OpenCodeRepo(str(self.target_repo_path), mode="direct") as repo:
-                optimizer = CodeOptimizer(repo, self.mcp, model=self.model)
-                
-                patch = optimizer.optimize(
-                    asdict(self.current_best_on_current),
-                    workload_type=f"cycle_{iteration}",
-                    workload_code=self.current_workload_code,
-                    retry_attempt=code_attempt,
-                    previous_patch_error=previous_patch_error
-                )
-                
-                if not patch:
-                    logger.warning(f"   ⚠️  No optimization generated")
-                    
-                    # Log patch failure
-                    self.detailed_log.log_patch_outcome(
-                        patch=None,
-                        success=False,
-                        error="No optimization generated",
-                        iteration=iteration,
-                        attempt=code_attempt
-                    )
-                    
-                    if code_attempt == self.max_code_retries:
-                        self.db.log(iteration, "code_opt", "All code optimization attempts failed", "")
-                        return False
-                    continue
-                
-                # Save patch to artifacts
-                self._save_patch(iteration, code_attempt, patch)
-                
-                # **NEW: Check if Mini-SWE-Agent already applied the patch**
-                mini_swe_applied = self._is_mini_swe_patch(patch)
-                
-                if mini_swe_applied:
-                    logger.info(f"   🤖 Mini-SWE-Agent already applied changes - skipping patch application")
-                    patch_applied = True  # Consider it "applied"
-                else:
-                    # Log patch outcome
-                    self.detailed_log.log_patch_outcome(
-                        patch=patch,
-                        success=True,
-                        error=None,
-                        iteration=iteration,
-                        attempt=code_attempt
-                    )
-                    
-                    # Apply patch normally
-                    logger.info(f"   📝 Applying patch...")
-                    patch_applied = repo.apply_patch(patch)
-                    
-                    if not patch_applied:
-                        previous_patch_error = "Patch application failed - likely malformed diff format"
-                        logger.error(f"   ❌ Failed to apply patch")
-                        
-                        # Log patch failure
-                        self.detailed_log.log_patch_outcome(
-                            patch=patch,
-                            success=False,
-                            error=previous_patch_error,
-                            iteration=iteration,
-                            attempt=code_attempt
-                        )
-                        
-                        if code_attempt == self.max_code_retries:
-                            return False
-                        continue
-                
-                previous_patch_error = None
-                
-                # === CRITICAL: Test on BOTH workloads ===
-                
-                # Test 1: BASELINE workload (PRIMARY METRIC - exclude warmup)
-                logger.info(f"   🎯 Testing on BASELINE workload (primary metric)...")
-                baseline_test_metrics = self._run_workload_on_repo(
-                    self.baseline_workload_code,
-                    repo.root,
-                    f"optimized_baseline_{iteration}_{code_attempt}",
-                    exclude_first_run=True  # Consistent with baseline
-                )
-                
-                if not baseline_test_metrics:
-                    logger.error(f"   ❌ Failed to run on baseline workload")
-                    if code_attempt == self.max_code_retries:
-                        return False
-                    continue
-                
-                # Test 2: CURRENT workload (SECONDARY METRIC)
-                logger.info(f"   🧪 Testing on CURRENT workload (secondary metric)...")
-                current_test_metrics = self._run_workload_on_repo(
-                    self.current_workload_code,
-                    repo.root,
-                    f"optimized_current_{iteration}_{code_attempt}",
-                    exclude_first_run=False  # Current workload doesn't exclude first run
-                )
-                
-                if not current_test_metrics:
-                    logger.error(f"   ❌ Failed to run on current workload")
-                    if code_attempt == self.max_code_retries:
-                        return False
-                    continue
-                
-                # Test 3: Correctness (must match baseline)
-                logger.info(f"   ✅ Testing correctness...")
-                correctness_pass, correctness_details = self._run_correctness_tests(repo.root)
-                baseline_test_metrics.correctness_pass = correctness_pass
-                baseline_test_metrics.correctness_details = correctness_details
-                
-                # Calculate improvements
-                baseline_improvement = baseline_test_metrics.improvement_percent(self.baseline_metrics)
-                current_improvement = current_test_metrics.improvement_percent(self.current_best_on_current)
-                
-                logger.info(f"\n   📊 RESULTS:")
-                logger.info(f"   {'─'*60}")
-                logger.info(f"   🎯 BASELINE workload (PRIMARY):")
-                logger.info(f"      Original: {self.baseline_metrics.execution_time:.3f}s")
-                logger.info(f"      Optimized: {baseline_test_metrics.execution_time:.3f}s")
-                logger.info(f"      Improvement: {baseline_improvement:+.2f}% {'✅' if baseline_improvement > 5.0 else '❌'}")
-                logger.info(f"")
-                logger.info(f"   🧪 CURRENT workload (SECONDARY):")
-                logger.info(f"      Best so far: {self.current_best_on_current.execution_time:.3f}s")
-                logger.info(f"      Optimized: {current_test_metrics.execution_time:.3f}s")
-                logger.info(f"      Improvement: {current_improvement:+.2f}% {'✅' if current_improvement > 5.0 else '❌'}")
-                logger.info(f"")
-                logger.info(f"   ✅ Correctness:")
-                logger.info(f"      Baseline: {'PASS' if self.baseline_correctness_pass else 'FAIL'}")
-                logger.info(f"      Optimized: {'PASS' if correctness_pass else 'FAIL'}")
-                logger.info(f"      Match: {'✅ YES' if correctness_pass == self.baseline_correctness_pass else '❌ NO'}")
-                if correctness_details:
-                    logger.info(f"      Details: {correctness_details}")
-                logger.info(f"   {'─'*60}\n")
-                
-                # Log patch test results
-                self.detailed_log.log_patch_test_results(
-                    baseline_metrics=baseline_test_metrics,
-                    current_metrics=current_test_metrics,
-                    original_baseline=self.baseline_metrics,
-                    original_current=self.current_best_on_current,
-                    correctness_pass=correctness_pass,
-                    correctness_details=correctness_details,
-                    baseline_correctness_pass=self.baseline_correctness_pass,
-                    iteration=iteration,
-                    attempt=code_attempt
-                )
-                
-                # === VALIDATION: Must beat baseline on BOTH workloads ===
-                
-                # Check 1: Must beat baseline on BASELINE workload (5% threshold)
-                if not baseline_test_metrics.is_better_than(self.baseline_metrics, threshold=0.05):
-                    logger.warning(f"   ⚠️  Did not beat baseline on BASELINE workload")
-                    logger.warning(f"       Need: >5.0% improvement | Got: {baseline_improvement:+.2f}%")
-                    if code_attempt == self.max_code_retries:
-                        self.db.log(iteration, "code_opt", "Failed to beat baseline on baseline workload", 
-                                   f"Best: {baseline_improvement:.2f}%")
-                        return False
-                    continue
-                
-                # Check 2: Must beat baseline on CURRENT workload (5% threshold)
-                # (On iteration 1, current == baseline, so this is automatically satisfied)
-                if not current_test_metrics.is_better_than(self.current_best_on_current, threshold=0.05):
-                    logger.warning(f"   ⚠️  Did not beat baseline on CURRENT workload")
-                    logger.warning(f"       Need: >5.0% improvement | Got: {current_improvement:+.2f}%")
-                    if code_attempt == self.max_code_retries:
-                        self.db.log(iteration, "code_opt", "Failed to beat baseline on current workload",
-                                   f"Best: {current_improvement:.2f}%")
-                        return False
-                    continue
-                
-                # Check 3: Correctness must match baseline
-                if correctness_pass != self.baseline_correctness_pass:
-                    logger.warning(f"   ⚠️  Correctness changed from baseline")
-                    logger.warning(f"       Baseline: {'PASS' if self.baseline_correctness_pass else 'FAIL'}")
-                    logger.warning(f"       Optimized: {'PASS' if correctness_pass else 'FAIL'}")
-                    if code_attempt == self.max_code_retries:
-                        self.db.log(iteration, "code_opt", "Correctness mismatch", 
-                                   f"Baseline: {self.baseline_correctness_pass}, Optimized: {correctness_pass}")
-                        return False
-                    continue
-                
-                # === SUCCESS! ===
-                logger.info(f"   ✅ CODE OPTIMIZATION SUCCESSFUL!")
-                logger.info(f"      🎯 Baseline improvement: {baseline_improvement:+.2f}%")
-                logger.info(f"      🧪 Current improvement: {current_improvement:+.2f}%")
-                logger.info(f"      ✅ Correctness: MATCHES BASELINE")
-                
-                optimized_code_patch = patch
-                optimized_on_baseline_metrics = baseline_test_metrics
-                optimized_on_current_metrics = current_test_metrics
-                
-                # Update current best metrics
-                self.current_best_on_baseline = baseline_test_metrics
-                self.current_best_on_current = current_test_metrics
-                
-                self.db.log(iteration, "code_opt", f"Success on attempt {code_attempt}",
-                           json.dumps({
-                               'baseline_improvement': baseline_improvement,
-                               'current_improvement': current_improvement,
-                               'correctness_match': True
-                           }))
-                
-                break  # Exit retry loop
-        
-        if not optimized_code_patch:
-            logger.error("❌ Code optimization failed after all retries")
-            return False
-        
-        # === PHASE 2: WORKLOAD EVOLUTION ===
-        logger.info(f"\n{'─'*80}")
-        logger.info(f"📈 PHASE 2: WORKLOAD EVOLUTION")
-        logger.info(f"{'─'*80}\n")
-        
-        new_workload_code = None
-        
-        for workload_attempt in range(1, self.max_workload_retries + 1):
-            logger.info(f"\n🔄 Workload generation attempt {workload_attempt}/{self.max_workload_retries}")
-            
-            # Generate harder workload - **NEW: Pass baseline_workload_code**
-            workload_gen = WorkloadGenerator(self.mcp, model=self.model)
-            
-            generated_workload = workload_gen.generate(
-                iteration,
-                baseline_workload_code=self.baseline_workload_code,  # **NEW: Pass baseline**
-                reference_docs=None,
-                previous_metrics=asdict(optimized_on_current_metrics)
-            )
-            
-            # Save workload
-            self._save_workload(iteration, workload_attempt, generated_workload)
-            
-            # Validate: Run on optimized code - should be SLOWER
-            logger.info(f"   🧪 Validating workload is harder...")
-            validation_metrics = self._run_workload_on_repo(
-                generated_workload,
-                self.target_repo_path,  # Use current optimized code
-                f"workload_validation_{iteration}_{workload_attempt}",
-                exclude_first_run=False
-            )
-            
-            if not validation_metrics:
-                logger.error(f"   ❌ Failed to run validation")
-                if workload_attempt == self.max_workload_retries:
-                    logger.warning("⚠️  Using current workload (no evolution)")
-                    new_workload_code = self.current_workload_code
-                    break
-                continue
-            
-            # Check if harder (slower than optimized code on current workload)
-            if validation_metrics.is_worse_than(optimized_on_current_metrics, threshold=0.05):
-                degradation = ((validation_metrics.execution_time - optimized_on_current_metrics.execution_time) / 
-                              optimized_on_current_metrics.execution_time * 100)
-                logger.info(f"   ✅ WORKLOAD VALIDATED!")
-                logger.info(f"      Optimized on current: {optimized_on_current_metrics.execution_time:.3f}s")
-                logger.info(f"      Optimized on new: {validation_metrics.execution_time:.3f}s")
-                logger.info(f"      Degradation: {degradation:+.2f}% (harder = good)")
-                new_workload_code = generated_workload
-                
-                # Log new workload
-                self.detailed_log.log_new_workload(
-                    workload_code=generated_workload,
-                    validation_metrics=validation_metrics,
-                    optimized_metrics=optimized_on_current_metrics,
-                    iteration=iteration,
-                    attempt=workload_attempt
-                )
-                
-                self.db.log(iteration, "workload_gen", f"Success on attempt {workload_attempt}",
-                           f"Degradation: {degradation:.2f}%")
-                break
-            else:
-                improvement = ((optimized_on_current_metrics.execution_time - validation_metrics.execution_time) / 
-                              optimized_on_current_metrics.execution_time * 100)
-                logger.warning(f"   ⚠️  Workload not hard enough")
-                logger.warning(f"       Need: >5% slower | Got: {improvement:+.2f}% faster")
-                if workload_attempt == self.max_workload_retries:
-                    logger.warning("⚠️  Using current workload (no evolution)")
-                    new_workload_code = self.current_workload_code
-                    self.db.log(iteration, "workload_gen", "All attempts failed", 
-                               f"Best was {improvement:.2f}% faster")
-                    break
-        
-        # Update state for next cycle
-        self.current_workload_code = new_workload_code
-        
-        # Save cycle result
-        cycle = CycleResult(
-            iteration=iteration,
-            baseline_workload_code=self.baseline_workload_code,
-            current_workload_code=new_workload_code,
-            optimized_code_patch=optimized_code_patch,
-            baseline_metrics=self.baseline_metrics,
-            optimized_on_baseline_metrics=optimized_on_baseline_metrics,
-            optimized_on_current_metrics=optimized_on_current_metrics,
-            workload_accepted=(new_workload_code != self.current_workload_code),
-            code_accepted=True,
-            baseline_improvement_percent=optimized_on_baseline_metrics.improvement_percent(self.baseline_metrics)
-        )
-        self.db.save_cycle(cycle)
-        
-        # Log iteration summary
-        self.detailed_log.log_iteration_summary(
-            iteration=iteration,
-            code_accepted=True,
-            workload_accepted=(new_workload_code != self.current_workload_code),
-            baseline_improvement=optimized_on_baseline_metrics.improvement_percent(self.baseline_metrics)
-        )
-        
-        logger.info(f"\n✅ CYCLE {iteration} COMPLETE")
-        logger.info(f"{'='*80}\n")
-        
-        return True
-    
     def _run_workload_on_repo(self, workload_code: str, repo_path: Path,
                               workload_type: str, exclude_first_run: bool = False) -> Optional[RunMetrics]:
-        """
-        Run workload on a repository
-        
-        Args:
-            workload_code: Python workload code
-            repo_path: Path to repository
-            workload_type: Type identifier for logging
-            exclude_first_run: If True, exclude first run (warmup/cache)
-        """
+        """Run workload on a repository"""
         try:
             result = self.mcp.run_workload(
                 workload_code=workload_code,
@@ -803,9 +1011,8 @@ class Orchestrator:
             
             metrics = result['metrics']
             
-            # Handle warmup exclusion if needed
+            # Handle warmup exclusion
             if exclude_first_run and 'all_runtimes' in metrics and len(metrics['all_runtimes']) > 1:
-                # Recalculate excluding first run
                 runtimes = metrics['all_runtimes'][1:]
                 import statistics
                 metrics['execution_time'] = statistics.mean(runtimes)
@@ -833,7 +1040,6 @@ class Orchestrator:
     def _run_correctness_tests(self, repo_path: Path) -> Tuple[bool, str]:
         """Run correctness tests"""
         try:
-            # Assume correctness test dir has a run.py or run.sh script
             test_script = None
             for name in ['run.py', 'run.sh', 'test.py']:
                 candidate = self.correctness_test_dir / name
@@ -845,7 +1051,6 @@ class Orchestrator:
                 logger.warning("   ⚠️  No test script found, assuming correctness")
                 return True, "No test script"
             
-            # Run test script
             cmd = ['python3', str(test_script)] if test_script.suffix == '.py' else ['bash', str(test_script)]
             
             result = subprocess.run(
@@ -866,21 +1071,21 @@ class Orchestrator:
             logger.error(f"   ❌ Correctness test error: {e}")
             return False, str(e)
     
-    def _save_patch(self, iteration: int, attempt: int, patch: str):
+    def _save_patch(self, workload_name: str, iteration: int, attempt: int, patch: str):
         """Save optimization patch"""
-        patch_dir = self.artifacts_dir / "patches"
-        patch_dir.mkdir(exist_ok=True)
+        patch_dir = self.artifacts_dir / "patches" / workload_name
+        patch_dir.mkdir(parents=True, exist_ok=True)
         
-        patch_file = patch_dir / f"cycle{iteration}_attempt{attempt}.diff"
+        patch_file = patch_dir / f"iter{iteration}_attempt{attempt}.diff"
         patch_file.write_text(patch)
         logger.info(f"   💾 Patch saved: {patch_file}")
     
-    def _save_workload(self, iteration: int, attempt: int, workload_code: str):
+    def _save_workload(self, workload_name: str, workload_code: str):
         """Save generated workload"""
         workload_dir = self.artifacts_dir / "workloads"
         workload_dir.mkdir(exist_ok=True)
         
-        workload_file = workload_dir / f"cycle{iteration}_attempt{attempt}.py"
+        workload_file = workload_dir / f"{workload_name}.py"
         workload_file.write_text(workload_code)
         logger.info(f"   💾 Workload saved: {workload_file}")
     
@@ -890,51 +1095,72 @@ class Orchestrator:
         logger.info("📊 FINAL OPTIMIZATION SUMMARY")
         logger.info("="*80)
         
-        if self.baseline_metrics and self.current_best_on_baseline:
-            total_improvement = self.current_best_on_baseline.improvement_percent(self.baseline_metrics)
-            
-            logger.info(f"\n🎯 PRIMARY METRIC: BASELINE WORKLOAD PERFORMANCE")
-            logger.info(f"   {'─'*60}")
-            logger.info(f"   Original (baseline): {self.baseline_metrics.execution_time:.3f}s")
-            logger.info(f"   Optimized (final):   {self.current_best_on_baseline.execution_time:.3f}s")
-            logger.info(f"   🏆 TOTAL IMPROVEMENT: {total_improvement:+.2f}%")
-            logger.info(f"   {'─'*60}")
-            
-            if self.current_best_on_current != self.current_best_on_baseline:
-                logger.info(f"\n🧪 SECONDARY METRIC: CURRENT WORKLOAD PERFORMANCE")
-                logger.info(f"   Best on current workload: {self.current_best_on_current.execution_time:.3f}s")
-            
-            logger.info(f"\n✅ CORRECTNESS STATUS")
-            logger.info(f"   Baseline: {'PASS' if self.baseline_correctness_pass else 'FAIL'}")
-            logger.info(f"   Final:    {'PASS' if self.current_best_on_baseline.correctness_pass else 'FAIL'}")
-            logger.info(f"   Match:    {'✅ YES' if self.current_best_on_baseline.correctness_pass == self.baseline_correctness_pass else '❌ NO'}")
+        if not self.baseline_metrics:
+            logger.info("No baseline established")
+            return
         
-        logger.info(f"\n📁 ARTIFACTS")
+        logger.info(f"\n📏 BASELINE (IMMUTABLE REFERENCE):")
+        logger.info(f"   Original workload: {self.baseline_metrics.execution_time:.3f}s")
+        logger.info(f"   Correctness: {'PASS' if self.baseline_correctness_pass else 'FAIL'}")
+        
+        logger.info(f"\n🏆 FASTEST TIMES:")
+        logger.info(f"   {'─'*60}")
+        logger.info(f"   Original workload:")
+        logger.info(f"      Baseline: {self.baseline_metrics.execution_time:.3f}s")
+        logger.info(f"      Fastest: {self.fastest_original.execution_time:.3f}s")
+        logger.info(f"      Improvement: {self.fastest_original.improvement_percent(self.baseline_metrics):+.2f}%")
+        
+        for workload_name, baseline in self.workload_baselines.items():
+            if workload_name == "original":
+                continue
+            fastest = self.workload_fastest.get(workload_name)
+            if fastest:
+                logger.info(f"\n   {workload_name}:")
+                logger.info(f"      Baseline: {baseline.execution_time:.3f}s")
+                logger.info(f"      Fastest: {fastest.execution_time:.3f}s")
+                logger.info(f"      Improvement: {fastest.improvement_percent(baseline):+.2f}%")
+        
+        logger.info(f"\n🎯 OPTIMIZATION RESULTS BY WORKLOAD:")
+        logger.info(f"   {'─'*60}")
+        
+        for workload_name, result in self.optimization_results.items():
+            logger.info(f"\n   📦 {workload_name.upper()}:")
+            logger.info(f"      Iterations: {result.iterations_completed}/{self.iterations_per_workload}")
+            if result.best_metrics_on_original:
+                logger.info(f"      Best on original: {result.best_metrics_on_original.execution_time:.3f}s")
+                logger.info(f"      Baseline improvement: {result.baseline_improvement_percent:+.2f}%")
+            if result.best_metrics_on_workload and not workload_name == "original":
+                logger.info(f"      Best on this workload: {result.best_metrics_on_workload.execution_time:.3f}s")
+        
+        # Overall best
+        if self.optimization_results:
+            best_overall = max(
+                self.optimization_results.values(),
+                key=lambda r: r.baseline_improvement_percent if r.best_metrics_on_original else 0.0
+            )
+            logger.info(f"\n🏆 BEST OVERALL IMPROVEMENT:")
+            logger.info(f"   Workload: {best_overall.workload_name}")
+            logger.info(f"   Baseline improvement: {best_overall.baseline_improvement_percent:+.2f}%")
+            logger.info(f"   Final time: {best_overall.best_metrics_on_original.execution_time:.3f}s")
+        
+        logger.info(f"\n📁 ARTIFACTS:")
         logger.info(f"   Directory: {self.artifacts_dir}")
-        logger.info(f"   Database:  {self.db.db_path}")
+        logger.info(f"   Database: {self.db.db_path}")
+        logger.info(f"   Workloads tested: {len(self.workloads)}")
+        logger.info(f"   Diverse workloads: {len([w for w in self.workloads if not w.is_original])}")
         logger.info("="*80)
-        
-        # Log comprehensive final summary
-        self.detailed_log.log_final_summary(
-            final_patch=None,
-            final_workload=self.current_workload_code,
-            baseline_metrics=self.baseline_metrics,
-            final_metrics=self.current_best_on_baseline,
-            final_on_final_workload=self.current_best_on_current
-        )
 
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Performance Optimization Orchestrator")
+    parser = argparse.ArgumentParser(description="Performance Optimization Orchestrator (Diverse Workload)")
     parser.add_argument('--repo', required=True, help='Target repository path')
     parser.add_argument('--baseline-workload', required=True, help='Baseline stress test workload file')
     parser.add_argument('--correctness-tests', required=True, help='Correctness test directory')
-    parser.add_argument('--iterations', type=int, default=3)
-    parser.add_argument('--code-retries', type=int, default=3)
-    parser.add_argument('--workload-retries', type=int, default=3)
-    parser.add_argument('--model', default='gpt-4o')
+    parser.add_argument('--iterations-per-workload', type=int, default=3, help='Optimization iterations per workload')
+    parser.add_argument('--code-retries', type=int, default=3, help='Max retries per optimization iteration')
+    parser.add_argument('--model', default='gpt-4o', help='LLM model')
     
     args = parser.parse_args()
     
@@ -942,9 +1168,8 @@ if __name__ == "__main__":
         target_repo=args.repo,
         baseline_workload=args.baseline_workload,
         correctness_test_dir=args.correctness_tests,
-        max_iterations=args.iterations,
+        iterations_per_workload=args.iterations_per_workload,
         max_code_retries=args.code_retries,
-        max_workload_retries=args.workload_retries,
         model=args.model
     )
     orchestrator.run()

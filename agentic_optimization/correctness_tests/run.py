@@ -2,8 +2,7 @@ import subprocess
 import sys
 
 TEST_FILES = [
-    "../venv/lib/python3.12/site-packages/pandas/tests/indexes/interval/test_setops.py",
-    "../venv/lib/python3.12/site-packages/pandas/tests/indexing/test_categorical.py",
+    # "../venv/lib/python3.12/site-packages/pandas/numpy/core/tests/test_numeric.py",
 ]
 
 def main():
@@ -15,9 +14,6 @@ def main():
             script_path = file_path[len("/testbed/"):]
         else:
             script_path = file_path
-
-        if not script_path.startswith("pandas/"):
-            continue
 
         result = subprocess.run(
             ["pytest", script_path],

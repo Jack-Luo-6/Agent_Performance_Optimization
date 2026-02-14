@@ -1,367 +1,468 @@
 """
-Workload Generator Agent
-Generates performance test workload CODE (not specs)
-Uses baseline workload to understand target functions
+Diverse Workload Generator - ConcoLLMic-Inspired Strategy
+Generates diverse performance test workloads using systematic path exploration
+
+Strategy (inspired by ConcoLLMic):
+1. Static Analysis: Extract CFG, identify unexplored/deep paths
+2. Heuristic Scoring: Score paths by complexity (loop depth, recursion, path length)
+3. Diverse Generation: Create workloads targeting DIFFERENT patterns than baseline
+4. Iterative Feedback: Use profiling to avoid redundancy
+
+Agent autonomously decides:
+- How many workloads to generate (based on code complexity)
+- What each workload targets (different path patterns)
 """
 
 import json
 import logging
-import sys
-import os
+import subprocess
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger('WorkloadAgent')
+logger = logging.getLogger('DiverseWorkloadGenerator')
 
 
-class WorkloadGenerator:
+@dataclass
+class WorkloadInfo:
+    """Information about a workload"""
+    name: str
+    code: str
+    description: str
+    is_original: bool = False
+
+
+class DiverseWorkloadGenerator:
     """
-    Generates executable workload code using LLM
+    Generates diverse workloads using ConcoLLMic-inspired strategy
     
-    CANNOT:
-    - See target code internals
-    - Access optimization history
-    - Run code directly
-    
-    CAN:
-    - Read baseline workload to understand target functions
-    - Read reference documents
-    - Generate Python workload code
-    - Request execution via MCP
-    - Adapt based on improved code versions
+    Key principles:
+    1. AVOID baseline patterns (use profiling to see what's already covered)
+    2. TARGET deep/complex paths (use heuristic scoring)
+    3. DIVERSIFY systematically (each workload targets different pattern)
+    4. LET AGENT DECIDE quantity (based on code complexity)
     """
     
     def __init__(self, mcp_server, model: str = "gpt-4o"):
         self.mcp = mcp_server
         self.model = model
-        self.system_prompt = self._build_system_prompt()
     
-    def _build_system_prompt(self) -> str:
-        return """You are a performance testing specialist who generates executable workload code. 
-
-Your job:
-- ANALYZE the baseline workload to identify which functions are being tested
-- Generate Python code that stress-tests THE SAME target functions
-- Create diverse, adversarial test patterns for THOSE SPECIFIC FUNCTIONS
-- Exercise worst-case scenarios
-- Produce deterministic, reproducible workloads
-- ESCALATE difficulty when code improves
-
-CRITICAL: You MUST test the SAME functions as the baseline workload!
-
-You will be given:
-- THE BASELINE WORKLOAD CODE (analyze this to see what's being tested!)
-- Reference documentation about the code structure
-- Previous workload patterns to build upon
-- Iteration number for progressive complexity
-- Previous performance metrics (if optimizer succeeded)
-
-You CANNOT:
-- See the actual implementation code
-- Know what optimizations were applied
-- Access profiler outputs
-
-CRITICAL OUTPUT FORMAT - MUST FOLLOW EXACTLY:
-You MUST generate code in this exact structure. This format is MANDATORY:
-
-```python
-import timeit
-import statistics
-# Add any other required imports here (pandas, numpy, etc.)
-
-def setup():
-    '''Setup function - initialize test data here'''
-    global test_data  # Declare all globals you'll use
-    
-    # Create your test data
-    test_data = list(range(10000))  # Example
-    
-    # You can create multiple test datasets
-    # global data1, data2, data3
-    # data1 = ...
-    # data2 = ...
-
-def workload():
-    '''Workload function - the actual work being tested'''
-    global test_data  # Access globals from setup
-    
-    # Call the target function or perform operations
-    # IMPORTANT: Use THE SAME functions as the baseline workload!
-    # Example: result = process_data(test_data)
-    # Example: arr1 < arr2  (for pandas/numpy operations)
-    
-    # DO NOT print inside workload() - it affects timing
-    pass
-
-# Run the benchmark (DO NOT MODIFY THIS SECTION)
-runtimes = timeit.repeat(workload, number=1, repeat=3, setup=setup)
-print(f"Mean: {statistics.mean(runtimes):.6f}")
-print(f"Std Dev: {statistics.stdev(runtimes):.6f}")
-```
-
-RULES YOU MUST FOLLOW:
-1. Always use setup() and workload() functions - NO EXCEPTIONS
-2. All test data MUST be created in setup(), NOT in global scope
-3. Use 'global' keyword in both setup() and workload() for shared variables
-4. workload() should ONLY contain the operations being tested
-5. NO print statements inside workload() - only in the final results
-6. Use timeit.repeat with number=1, repeat=3 (fixed)
-7. Print Mean and Std Dev at the end
-8. NO try/except around workload() - let errors bubble up
-9. Imports go at the top, NOT inside functions
-10. The code must be completely self-contained and runnable
-11. **CRITICAL**: Test THE SAME functions/operations as the baseline workload!
-
-EXAMPLE FOR PANDAS/NUMPY CODE:
-```python
-import pandas as pd
-import numpy as np
-import timeit
-import statistics
-
-def setup():
-    global arr1, arr2
-    N = 10_000_000
-    base = pd.date_range("2000-01-01", periods=N, freq="s")
-    arr1 = base._data
-    arr2 = pd.date_range("2000-01-01 00:00:01", periods=N, freq="s")._data
-
-def workload():
-    global arr1, arr2
-    arr1 < arr2  # Testing the < operator on DatetimeArray
-
-runtimes = timeit.repeat(workload, number=1, repeat=3, setup=setup)
-print(f"Mean: {statistics.mean(runtimes):.6f}")
-print(f"Std Dev: {statistics.stdev(runtimes):.6f}")
-```
-
-EXAMPLE FOR CUSTOM CODE:
-```python
-import timeit
-import statistics
-import random
-
-def setup():
-    global test_data, large_data, edge_cases
-    random.seed(42)
-    
-    # Various test patterns
-    test_data = list(range(10000))
-    large_data = [random.randint(0, 1000) for _ in range(100000)]
-    edge_cases = [[], [1], [1]*1000]
-
-def workload():
-    global test_data, large_data, edge_cases
-    
-    # Call target functions (same as baseline!)
-    # from target_module import process_data
-    # for data in [test_data, large_data] + edge_cases:
-    #     if data:  # Skip empty
-    #         process_data(data)
-    pass
-
-runtimes = timeit.repeat(workload, number=1, repeat=3, setup=setup)
-print(f"Mean: {statistics.mean(runtimes):.6f}")
-print(f"Std Dev: {statistics.stdev(runtimes):.6f}")
-```
-
-Focus on:
-- Input size variation (small → large)
-- Pattern variation (random, sorted, reverse, duplicates)
-- Edge cases (empty, single element, all same)
-- Memory-intensive patterns
-- Realistic but challenging scenarios
-
-ADAPTIVE DIFFICULTY:
-When previous metrics are provided (meaning optimizer succeeded):
-- INCREASE data sizes significantly (2-10x larger)
-- Add MORE complex patterns (nested structures, pathological cases)
-- Combine multiple stress factors simultaneously
-- Target algorithmic weaknesses revealed by success
-- Make the optimizer WORK HARDER next time
-
-REMEMBER: The code must run without modification. Use the exact format shown above."""
-    
-    def generate(self, iteration: int, baseline_workload_code: str,
-                 reference_docs: Optional[str] = None, 
-                 previous_metrics: Optional[Dict] = None) -> str:
+    def generate_diverse_workloads(self,
+                                   baseline_workload_code: str,
+                                   target_repo_path: Path,
+                                   profiling_report = None,
+                                   baseline_metrics = None) -> List[WorkloadInfo]:
         """
-        Generate workload code
+        Generate diverse workloads
         
         Args:
-            iteration: Current iteration number
-            baseline_workload_code: The original baseline workload to analyze and build upon
-            reference_docs: Reference documentation about code structure
-            previous_metrics: Metrics from previous successful optimization (if any)
+            baseline_workload_code: Original workload (to AVOID its patterns)
+            target_repo_path: Path to target code
+            profiling_report: Profiling data showing current coverage
+            baseline_metrics: Baseline performance metrics
         
         Returns:
-            Executable Python workload code
+            List of WorkloadInfo objects (agent decides how many)
         """
-        logger.info(f"Generating workload code for iteration {iteration}")
-        logger.info(f"  Analyzing baseline workload to identify target functions...")
+        logger.info("Generating diverse workloads using ConcoLLMic-inspired strategy...")
         
-        if previous_metrics:
-            logger.info(f"  Adapting to improved code (prev time: {previous_metrics.get('execution_time', 0):.3f}s)")
+        # Build context for agent
+        profiling_context = self._build_profiling_context(profiling_report)
+        baseline_context = self._build_baseline_context(baseline_workload_code, baseline_metrics)
+        strategy_context = self._build_strategy_context()
         
-        api_key = os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            logger.warning("No OPENAI_API_KEY found, using template workload")
-            return self._generate_template_workload(iteration)
+        # Call Mini-SWE-Agent to generate workloads
+        workload_infos = self._generate_with_mini_swe(
+            baseline_workload_code=baseline_workload_code,
+            target_repo_path=target_repo_path,
+            profiling_context=profiling_context,
+            baseline_context=baseline_context,
+            strategy_context=strategy_context
+        )
         
-        try:
-            from openai import OpenAI
-            
-            client = OpenAI(api_key=api_key)
-            
-            # Build context with baseline workload analysis
-            context = f"""BASELINE WORKLOAD TO ANALYZE:
+        if not workload_infos:
+            logger.warning("Failed to generate diverse workloads")
+            return []
+        
+        logger.info(f"✓ Generated {len(workload_infos)} diverse workload(s)")
+        
+        return workload_infos
+    
+    def _build_profiling_context(self, profiling_report) -> str:
+        """Build context showing what's already covered (to AVOID)"""
+        if not profiling_report:
+            return """
+🔬 PROFILING DATA: Not available
+
+Without profiling data, focus on generating diverse algorithmic patterns:
+- Different data structures (sorted, random, pathological)
+- Different operation patterns (sequential, random access, worst-case)
+- Different edge cases (empty, single element, duplicates, extremes)
+"""
+        
+        # Extract coverage gaps
+        uncovered_info = ""
+        if profiling_report.coverage.uncovered_lines:
+            total_uncovered = sum(len(lines) for lines in profiling_report.coverage.uncovered_lines.values())
+            uncovered_info = f"""
+📊 COVERAGE GAPS (TARGET THESE):
+- Total uncovered lines: {total_uncovered}
+- Files with gaps: {len(profiling_report.coverage.uncovered_lines)}
+- Overall coverage: {profiling_report.coverage.overall_coverage_percent:.1f}%
+
+Your workloads should try to execute these uncovered paths!
+"""
+        
+        # Extract hot paths (to DIVERSIFY FROM)
+        hot_paths_info = ""
+        if profiling_report.function_profiles:
+            covered_funcs = [fp.name for fp in profiling_report.function_profiles[:5]]
+            hot_paths_info = f"""
+🔥 ALREADY COVERED (DIVERSIFY FROM THESE):
+Top functions executed by baseline:
+{chr(10).join(f'  • {func}' for func in covered_funcs)}
+
+Your workloads should:
+- Call DIFFERENT functions (explore other code paths)
+- Use DIFFERENT data patterns (avoid similar inputs)
+- Target UNCOVERED branches
+"""
+        
+        return f"""
+🔬 PROFILING DATA - GUIDE YOUR DIVERSITY STRATEGY
+
+{uncovered_info}
+
+{hot_paths_info}
+
+{profiling_report.to_llm_context() if profiling_report else ''}
+"""
+    
+    def _build_baseline_context(self, baseline_code: str, baseline_metrics) -> str:
+        """Build context showing baseline workload (to DIFFERENTIATE FROM)"""
+        metrics_info = ""
+        if baseline_metrics:
+            metrics_info = f"""
+📊 Baseline Performance:
+- Execution time: {baseline_metrics.execution_time:.3f}s
+- Memory: {baseline_metrics.memory_mb:.1f}MB
+- Success rate: {baseline_metrics.success_rate:.1%}
+"""
+        
+        return f"""
+📝 BASELINE WORKLOAD - ANALYZE TO DIFFERENTIATE
+
+{metrics_info}
+
 ```python
-{baseline_workload_code}
+{baseline_code}
 ```
 
-YOUR TASK:
-1. FIRST: Analyze the baseline workload above to identify:
-   - Which functions/operations are being tested
-   - What imports are used
-   - What data structures are being stress-tested
-   - What operations are performed (e.g., comparisons, sorting, filtering)
+CRITICAL ANALYSIS QUESTIONS:
+1. What functions does baseline call? → Target DIFFERENT functions
+2. What data patterns does it use? → Use DIFFERENT patterns
+3. What operations does it perform? → Test DIFFERENT operations
+4. What edge cases does it miss? → Target those edge cases
 
-2. SECOND: Generate a HARDER workload that tests THE SAME functions/operations
-   - Keep the same imports and target functions
-   - Make data sizes larger
-   - Add more complex patterns
-   - Include edge cases
-
+Your diverse workloads MUST:
+✓ Test the SAME codebase (same imports/modules)
+✓ Use DIFFERENT code paths than baseline
+✓ Create DIFFERENT stress patterns
+✗ DO NOT just scale up baseline (that's not diversity!)
 """
-            
-            # Add adaptive difficulty context
-            if previous_metrics:
-                context += f"""
-CRITICAL: The optimizer SUCCEEDED in the previous iteration!
-Previous metrics:
-- Execution time: {previous_metrics.get('execution_time', 0):.3f}s
-- Memory: {previous_metrics.get('memory_mb', 0):.1f}MB
-- Success rate: {previous_metrics.get('success_rate', 0):.1%}
+    
+    def _build_strategy_context(self) -> str:
+        """Build ConcoLLMic-inspired strategy context"""
+        return """
+🎯 CONCOLLMIC-INSPIRED DIVERSITY STRATEGY
 
-This means the code is now FASTER and MORE EFFICIENT.
-Your job: Make this workload SIGNIFICANTLY HARDER to beat the improved code.
+PRINCIPLE: Systematic exploration of DIVERSE execution paths
 
-Strategies to increase difficulty:
-1. SCALE UP: Increase data sizes by 5-10x from baseline
-2. COMPLEXITY: Use more complex data patterns (nested, pathological)
-3. COMBINE: Mix multiple stress factors (size + complexity + edge cases)
-4. TARGET WEAKNESSES: Push algorithmic limits harder
+1️⃣ STATIC ANALYSIS (your job):
+   - Identify code structure (loops, recursion, branches)
+   - Find deep/complex paths (high cyclomatic complexity)
+   - Locate uncovered regions (from profiling data)
 
-The optimizer beat your last workload - make sure this one is MUCH tougher!
+2️⃣ HEURISTIC SCORING (prioritize):
+   - Loop nesting depth × 3 (nested loops = high priority)
+   - Recursion depth × 5 (recursive calls = high priority)
+   - Path length × 2 (deep call chains = high priority)
+   - Cyclomatic complexity × 1 (many branches = high priority)
 
-Iteration context:
-- This is iteration {iteration} of the optimization cycle
-- Focus: {"worst-case algorithmic patterns" if iteration % 3 == 0 else "extreme memory pressure" if iteration % 3 == 1 else "pathological edge cases"}
+3️⃣ DIVERSITY PATTERNS (each workload targets ONE):
+   Pattern A: ALGORITHMIC WORST-CASE
+     - Pathological inputs (reverse sorted for sort, collisions for hash)
+     - Trigger O(n²) paths in O(n log n) algorithms
+   
+   Pattern B: DEEP RECURSION/NESTING
+     - Inputs causing maximum recursion depth
+     - Deeply nested data structures
+   
+   Pattern C: EDGE CASE COMBINATIONS
+     - Empty + boundary + extreme values together
+     - Unusual type combinations
+   
+   Pattern D: MEMORY PRESSURE
+     - Large data structures
+     - Many allocations/deallocations
+   
+   Pattern E: UNCOVERED BRANCHES
+     - Target specific uncovered lines from profiling
+     - Error paths, exceptional cases
+
+4️⃣ AGENT DECISION (YOU DECIDE):
+   Based on code complexity, decide HOW MANY workloads:
+   - Simple code (< 500 LoC, few branches): 2-3 workloads
+   - Medium code (500-2000 LoC, moderate complexity): 3-5 workloads
+   - Complex code (> 2000 LoC, high complexity): 5-8 workloads
+   
+   Each workload should target a DIFFERENT pattern above!
+
+5️⃣ IMPLEMENTATION RULES:
+   ✓ Each workload = 1 Python file with timeit benchmark
+   ✓ Same format as baseline (setup(), workload(), timeit.repeat)
+   ✓ DIFFERENT code paths than baseline
+   ✓ Clear description of what pattern it targets
+   ✗ DO NOT just copy baseline with bigger numbers!
 """
-            else:
-                context += f"""
-Iteration context:
-- This is iteration {iteration} of the optimization cycle
-- This is the FIRST workload (or optimizer failed previously)
-- Focus: {"algorithmic complexity" if iteration % 3 == 0 else "memory patterns" if iteration % 3 == 1 else "edge cases"}
-- Create a challenging but fair baseline test that's HARDER than the original baseline
-"""
-            
-            context += """
-CRITICAL: You MUST use this EXACT format:
+    
+    def _generate_with_mini_swe(self,
+                                baseline_workload_code: str,
+                                target_repo_path: Path,
+                                profiling_context: str,
+                                baseline_context: str,
+                                strategy_context: str) -> List[WorkloadInfo]:
+        """Use Mini-SWE-Agent to generate diverse workloads"""
+        
+        abs_repo_path = target_repo_path.absolute()
+        output_dir = Path.cwd() / 'artifacts' / 'diverse_workloads'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        task = f"""Generate DIVERSE performance test workloads for systematic path exploration.
+
+🎯 YOUR MISSION: Create multiple DIFFERENT workloads that stress DIFFERENT code paths
+
+📁 TARGET CODE LOCATION:
+{abs_repo_path}
+
+First, explore the code structure:
+cd {abs_repo_path}
+find . -name "*.py" -type f | grep -v __pycache__ | head -20
+ls -la
+
+{baseline_context}
+
+{profiling_context}
+
+{strategy_context}
+
+📋 STEP-BY-STEP PROCESS:
+
+STEP 1: ANALYZE CODE STRUCTURE
+- Explore {abs_repo_path}
+- Identify main modules and functions
+- Estimate code complexity (LoC, branches, loops)
+- Review profiling data for coverage gaps
+
+STEP 2: DECIDE QUANTITY
+Based on complexity, decide how many diverse workloads to create (2-8).
+You MUST create a plan file first:
+
+cat > {output_dir}/diversity_plan.json << 'EOF'
+{{
+  "num_workloads": <YOUR_DECISION>,
+  "reasoning": "<why this many workloads>",
+  "workloads": [
+    {{
+      "name": "diverse_1",
+      "pattern": "<which pattern: worst_case/deep_recursion/edge_cases/memory/uncovered>",
+      "target": "<what specific code path or function>",
+      "differentiation": "<how it differs from baseline>"
+    }},
+    ...
+  ]
+}}
+EOF
+
+STEP 3: GENERATE EACH WORKLOAD
+For each workload in your plan, create a file:
+
+{output_dir}/diverse_<N>.py
+
+Each file MUST follow this EXACT format:
 
 ```python
 import timeit
 import statistics
-# Add other imports if needed (MATCH THE BASELINE IMPORTS!)
+# Add required imports (MATCH baseline imports!)
 
 def setup():
-    '''Create test data here'''
-    global var1, var2  # Declare globals
-    var1 = ...  # Initialize data
-    var2 = ...
+    '''Setup - create test data targeting <PATTERN>'''
+    global test_data  # Declare globals
+    
+    # Create data for THIS pattern
+    # Example for worst_case: reverse sorted for sort algorithm
+    # Example for deep_recursion: deeply nested structure
+    test_data = ...
 
 def workload():
-    '''The actual work being tested'''
-    global var1, var2  # Access globals
-    # Perform operations here (SAME OPERATIONS AS BASELINE!)
-    # Example: result = some_function(var1)
+    '''Workload - execute target functions on test data'''
+    global test_data
+    
+    # Call SAME functions as baseline
+    # but with DIFFERENT data patterns
+    # from target_module import target_function
+    # result = target_function(test_data)
+    pass
 
+# Benchmark (DO NOT MODIFY)
 runtimes = timeit.repeat(workload, number=1, repeat=3, setup=setup)
-print(f"Mean: {statistics.mean(runtimes):.6f}")
-print(f"Std Dev: {statistics.stdev(runtimes):.6f}")
+print(f"Mean: {{statistics.mean(runtimes):.6f}}")
+print(f"Std Dev: {{statistics.stdev(runtimes):.6f}}")
 ```
 
-RULES:
-1. ALL test data MUST be created in setup()
-2. Use global keyword for shared variables
-3. NO prints inside workload()
-4. Use timeit.repeat with number=1, repeat=3
-5. Code must be runnable as-is
-6. **CRITICAL**: Test THE SAME functions/operations as the baseline workload!
+STEP 4: CREATE METADATA FILE
+After generating all workloads:
 
-"""
-            
-            if reference_docs:
-                context += f"\nAdditional reference documentation:\n{reference_docs}\n"
-            
-            context += """
-Generate ONLY the Python code following the format above.
-NO explanations, NO markdown formatting, JUST the code.
-The code will be executed directly, so it must work without modification.
+cat > {output_dir}/workloads_manifest.json << 'EOF'
+[
+  {{
+    "name": "diverse_1",
+    "description": "<full description of what this tests>",
+    "file": "diverse_1.py"
+  }},
+  ...
+]
+EOF
 
-REMEMBER: Identify the target functions from the baseline workload and test THOSE SAME functions with harder inputs!
-"""
+⚠️ CRITICAL REQUIREMENTS:
+1. CREATE diversity_plan.json FIRST (shows your reasoning)
+2. Each workload file MUST be valid Python
+3. Each workload MUST target DIFFERENT pattern
+4. All workloads MUST test SAME functions/modules as baseline
+5. Each workload MUST have clear differentiation from baseline
+6. CREATE workloads_manifest.json LAST (I will parse this!)
+
+📁 FILES TO CREATE:
+{output_dir}/diversity_plan.json        (your analysis & plan)
+{output_dir}/diverse_1.py               (workload 1)
+{output_dir}/diverse_2.py               (workload 2)
+...
+{output_dir}/workloads_manifest.json    (final metadata)
+
+VERIFY YOUR WORK:
+ls -la {output_dir}/
+cat {output_dir}/workloads_manifest.json
+
+When done, run:
+echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"""
+        
+        try:
+            traj_dir = Path.cwd() / 'artifacts' / 'mini_swe_output'
+            traj_dir.mkdir(parents=True, exist_ok=True)
+            traj_file = traj_dir / "diverse_workload_gen.json"
             
-            logger.info(f"Calling {self.model}...")
+            import shlex
+            task_arg = f"$(cat <<'EOF'\n{task}\nEOF\n)"
+            cmd_str = f"mini -y -m {shlex.quote(self.model)} -t {shlex.quote(task_arg)} -o {shlex.quote(str(traj_file.absolute()))} -c mini.yaml"
             
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": context}
-                ],
-                temperature=0.7  # Higher temperature for more creative adversarial workloads
+            logger.info(f"Running Mini-SWE-Agent for diverse workload generation...")
+            logger.info(f"Task length: {len(task)} chars")
+            logger.info(f"Output directory: {output_dir}")
+            
+            result = subprocess.run(
+                f"yes '' | {cmd_str}",
+                shell=True,
+                cwd=Path.cwd(),
+                capture_output=True,
+                text=True,
+                timeout=900  # 15 minutes for multiple workloads
             )
             
-            workload_code = response.choices[0].message.content.strip()
+            if result.returncode != 0:
+                logger.error(f"Mini-SWE-Agent failed with code {result.returncode}")
+                return []
             
-            # Clean markdown formatting
-            if workload_code.startswith("```python"):
-                workload_code = workload_code[9:]
-            elif workload_code.startswith("```"):
-                workload_code = workload_code[3:]
-            if workload_code.endswith("```"):
-                workload_code = workload_code[:-3]
-            workload_code = workload_code.strip()
+            logger.info("Mini-SWE-Agent completed")
             
-            # Validate format
-            if not self._validate_workload_format(workload_code):
-                logger.warning("Generated workload doesn't match required format, using template")
-                return self._generate_template_workload(iteration)
+            # Parse manifest
+            manifest_file = output_dir / "workloads_manifest.json"
             
-            logger.info(f"✓ Workload code generated ({len(workload_code)} chars)")
+            if not manifest_file.exists():
+                logger.warning("⚠️  Manifest file not created")
+                # Try to discover workload files
+                return self._discover_workloads(output_dir)
             
-            # Log the generated workload
-            self._log_workload(iteration, workload_code)
+            with open(manifest_file) as f:
+                manifest = json.load(f)
             
-            return workload_code
+            workload_infos = []
+            for entry in manifest:
+                workload_file = output_dir / entry['file']
+                if not workload_file.exists():
+                    logger.warning(f"⚠️  Workload file not found: {workload_file}")
+                    continue
+                
+                workload_code = workload_file.read_text()
+                
+                # Validate format
+                if not self._validate_workload_format(workload_code):
+                    logger.warning(f"⚠️  Invalid workload format: {entry['name']}")
+                    continue
+                
+                workload_infos.append(WorkloadInfo(
+                    name=entry['name'],
+                    code=workload_code,
+                    description=entry['description'],
+                    is_original=False
+                ))
             
-        except ImportError:
-            logger.error("openai package not installed")
-            logger.info("Install with: pip install openai")
-            return self._generate_template_workload(iteration)
+            return workload_infos
+                
+        except subprocess.TimeoutExpired:
+            logger.error("Mini-SWE-Agent timed out after 15 minutes")
+            return []
+        except FileNotFoundError:
+            logger.warning("mini command not found. Install: pip install mini-swe-agent")
+            return []
         except Exception as e:
-            logger.error(f"Error calling OpenAI API: {e}", exc_info=True)
-            logger.warning("Falling back to template workload")
-            return self._generate_template_workload(iteration)
+            logger.error(f"Mini-SWE-Agent error: {e}", exc_info=True)
+            return []
+    
+    def _discover_workloads(self, output_dir: Path) -> List[WorkloadInfo]:
+        """Fallback: discover workload files without manifest"""
+        logger.info("Attempting to discover workload files...")
+        
+        workload_files = sorted(output_dir.glob("diverse_*.py"))
+        
+        if not workload_files:
+            logger.warning("No workload files found")
+            return []
+        
+        workload_infos = []
+        for idx, wl_file in enumerate(workload_files, 1):
+            workload_code = wl_file.read_text()
+            
+            if not self._validate_workload_format(workload_code):
+                logger.warning(f"⚠️  Invalid format: {wl_file.name}")
+                continue
+            
+            workload_infos.append(WorkloadInfo(
+                name=f"diverse_{idx}",
+                code=workload_code,
+                description=f"Discovered from {wl_file.name}",
+                is_original=False
+            ))
+        
+        logger.info(f"✓ Discovered {len(workload_infos)} workload(s)")
+        return workload_infos
     
     def _validate_workload_format(self, code: str) -> bool:
-        """Validate that workload follows required format"""
+        """Validate workload follows required format"""
         required_patterns = [
             'def setup():',
             'def workload():',
@@ -372,163 +473,37 @@ REMEMBER: Identify the target functions from the baseline workload and test THOS
         
         for pattern in required_patterns:
             if pattern not in code:
-                logger.warning(f"Missing required pattern: {pattern}")
                 return False
         
         return True
-    
-    def _generate_template_workload(self, iteration: int) -> str:
-        """Fallback template workload - FOLLOWS STANDARD FORMAT"""
-        logger.info("Generating template workload code")
-        
-        templates = [
-            # Template 1: Size variation
-            """import timeit
-import statistics
-
-def setup():
-    '''Setup test data with size variation'''
-    global small_data, medium_data, large_data
-    
-    # Size variation tests
-    small_data = list(range(100))
-    medium_data = list(range(1000))
-    large_data = list(range(10000))
-
-def workload():
-    '''Run workload'''
-    global small_data, medium_data, large_data
-    
-    # Process each dataset
-    # from main import process_data
-    # result1 = process_data(small_data)
-    # result2 = process_data(medium_data)
-    # result3 = process_data(large_data)
-    
-    # Placeholder - replace with actual function calls
-    _ = len(small_data) + len(medium_data) + len(large_data)
-
-runtimes = timeit.repeat(workload, number=1, repeat=3, setup=setup)
-print(f"Mean: {statistics.mean(runtimes):.6f}")
-print(f"Std Dev: {statistics.stdev(runtimes):.6f}")
-""",
-            # Template 2: Pattern variation
-            """import timeit
-import statistics
-import random
-
-def setup():
-    '''Setup test data with pattern variation'''
-    global sequential, randomized, duplicates, sorted_data
-    
-    random.seed(42)
-    
-    # Pattern variation tests
-    sequential = list(range(5000))
-    randomized = random.sample(range(10000), 5000)
-    duplicates = [random.randint(0, 100) for _ in range(5000)]
-    sorted_data = sorted(randomized)
-
-def workload():
-    '''Run workload'''
-    global sequential, randomized, duplicates, sorted_data
-    
-    # Process each pattern
-    # from main import process_data
-    # r1 = process_data(sequential)
-    # r2 = process_data(randomized)
-    # r3 = process_data(duplicates)
-    # r4 = process_data(sorted_data)
-    
-    # Placeholder
-    _ = len(sequential)
-
-runtimes = timeit.repeat(workload, number=1, repeat=3, setup=setup)
-print(f"Mean: {statistics.mean(runtimes):.6f}")
-print(f"Std Dev: {statistics.stdev(runtimes):.6f}")
-""",
-            # Template 3: Edge cases
-            """import timeit
-import statistics
-
-def setup():
-    '''Setup edge case test data'''
-    global empty, single, duplicates, reverse_sorted
-    
-    # Edge cases
-    empty = []
-    single = [42]
-    duplicates = [1] * 1000
-    reverse_sorted = list(range(5000, 0, -1))
-
-def workload():
-    '''Run workload'''
-    global empty, single, duplicates, reverse_sorted
-    
-    # Test edge cases
-    # from main import process_data
-    # if empty: process_data(empty)
-    # r1 = process_data(single)
-    # r2 = process_data(duplicates)
-    # r3 = process_data(reverse_sorted)
-    
-    # Placeholder
-    _ = len(duplicates)
-
-runtimes = timeit.repeat(workload, number=1, repeat=3, setup=setup)
-print(f"Mean: {statistics.mean(runtimes):.6f}")
-print(f"Std Dev: {statistics.stdev(runtimes):.6f}")
-"""
-        ]
-        
-        template = templates[iteration % len(templates)]
-        logger.warning("Using template workload - for testing only!")
-        return template
-    
-    def _log_workload(self, iteration: int, workload_code: str) -> None:
-        """Log generated workload code"""
-        log_dir = Path("artifacts/workloads")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        
-        log_file = log_dir / f"workload_{iteration}.py"
-        log_file.write_text(workload_code)
-        logger.info(f"Workload code logged to {log_file}")
 
 
 if __name__ == "__main__":
     import argparse
+    from mcp.server import MCPServer
     
-    parser = argparse.ArgumentParser(description="Workload Generator Agent")
-    parser.add_argument('--iteration', type=int, required=True)
-    parser.add_argument('--baseline-workload', required=True, help='Path to baseline workload file')
+    parser = argparse.ArgumentParser(description="Diverse Workload Generator")
+    parser.add_argument('--baseline-workload', required=True)
+    parser.add_argument('--target-repo', required=True)
     parser.add_argument('--model', default='gpt-4o')
-    parser.add_argument('--reference', help='Path to reference documentation')
-    parser.add_argument('--prev-metrics', help='Path to previous metrics JSON (optional)')
     
     args = parser.parse_args()
     
-    # Load baseline workload
     baseline_workload_code = Path(args.baseline_workload).read_text()
     
-    # Load reference docs if provided
-    reference_docs = None
-    if args.reference and Path(args.reference).exists():
-        reference_docs = Path(args.reference).read_text()
-    
-    # Load previous metrics if provided
-    previous_metrics = None
-    if args.prev_metrics and Path(args.prev_metrics).exists():
-        with open(args.prev_metrics) as f:
-            previous_metrics = json.load(f)
-    
-    # Note: In standalone mode, no MCP server
-    # This is just for testing - normally called by orchestrator
-    from mcp.server import MCPServer
     mcp = MCPServer()
+    generator = DiverseWorkloadGenerator(mcp, model=args.model)
     
-    generator = WorkloadGenerator(mcp, model=args.model)
-    workload_code = generator.generate(args.iteration, baseline_workload_code, 
-                                       reference_docs, previous_metrics)
+    workload_infos = generator.generate_diverse_workloads(
+        baseline_workload_code=baseline_workload_code,
+        target_repo_path=Path(args.target_repo),
+        profiling_report=None,
+        baseline_metrics=None
+    )
     
-    # Output to stdout
-    print(workload_code)
+    for wl in workload_infos:
+        print(f"\n{'='*80}")
+        print(f"Workload: {wl.name}")
+        print(f"Description: {wl.description}")
+        print(f"{'='*80}")
+        print(wl.code)

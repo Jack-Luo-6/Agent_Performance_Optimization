@@ -1,0 +1,695 @@
+╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                                  ║║                               PERFORMANCE OPTIMIZATION LOG: pandas                               ║║                                                                                                  ║╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+
+
+
+====================================================================================================
+RUN INFORMATION====================================================================================================
+Start Time:        2026-02-10 22:12:36
+Repository:        pandas
+Log File:          logs/pandas_run_004.txt
+
+
+Command Line Arguments:
+  --repo                 ./venv/lib/python3.12/site-packages/pandas
+  --baseline_workload    baseline_workload/stress_test.py
+  --correctness_tests    correctness_tests
+  --iterations           3
+  --code_retries         3
+  --workload_retries     3
+  --model                gpt-5
+
+
+
+====================================================================================================
+BASELINE CONFIGURATION====================================================================================================
+
+📊 BASELINE STRESS TEST WORKLOAD
+File: baseline_workload/stress_test.py
+
+Code:
+import pandas as pd
+import numpy as np
+import timeit
+import statistics
+
+def setup():
+    global arr1, arr2
+N = 10_000_000
+
+base = pd.date_range("2000-01-01", periods=N, freq="s")
+arr1 = base._data # DatetimeArray
+arr2 = pd.date_range("2000-01-01 00:00:01", periods=N, freq="s")._data
+
+def workload():
+    global arr1, arr2
+    arr1 < arr2
+
+runtimes = timeit.repeat(workload, number=10, repeat=25, setup = setup)
+print("Mean:", statistics.mean(runtimes))
+print("Std Dev:", statistics.stdev(runtimes))
+
+
+
+✅ CORRECTNESS TEST CONFIGURATION
+Directory: correctness_tests
+
+
+
+====================================================================================================
+BASELINE PERFORMANCE RESULTS====================================================================================================
+
+⏱️  PERFORMANCE METRICS
+  Execution Time:    3.307579s  (warmup excluded)
+  P50 Latency:       2.271037s
+  P99 Latency:       12.547449s
+  Memory Usage:      246.77 MB
+  CPU Usage:         162.9%
+  Success Rate:      100.00%
+
+
+
+✅ CORRECTNESS RESULTS
+  Status:            ✅ PASS
+  Details:           1.000000
+
+
+
+
+====================================================================================================
+ITERATION 1/3====================================================================================================
+
+Started: 2026-02-10 22:13:09
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Profiling Results - Iteration 1, Attempt 1────────────────────────────────────────────────────────────────────────────────────────────────────
+=== TOP BOTTLENECKS (>5% time) ===
+1. <built-in method builtins.exec> - 2.54s (100.0%) [430 calls]
+   📁 ~
+2. <module> - 2.54s (100.0%) [1 calls]
+   📁 /var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle1_attempt1.py
+3. repeat - 2.26s (88.7%) [1 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+4. repeat - 2.26s (88.7%) [1 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+5. timeit - 2.26s (88.7%) [25 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+6. inner - 2.25s (88.7%) [25 calls]
+   📁 <timeit-src>
+7. workload - 2.25s (88.6%) [250 calls]
+   📁 /var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle1_attempt1.py
+8. <built-in method _operator.lt> - 0.96s (37.9%) [250 calls]
+   📁 ~
+9. _find_and_load - 0.27s (10.8%) [516 calls]
+   📁 <frozen importlib._bootstrap>
+10. _find_and_load_unlocked - 0.27s (10.8%) [516 calls]
+   📁 <frozen importlib._bootstrap>
+
+=== MEMORY ===
+Peak: 222.8 MB
+Top allocations:
+  1. 0.3 MB - inspect.py:909
+  2. 0.1 MB - functools.py:52
+
+=== COVERAGE ===
+Overall: 39828.0%
+Files executed: 1419
+
+=== OPTIMIZATION PRIORITY ===
+🎯 FOCUS HERE: 15 functions consume 747% of runtime
+   Start with: <built-in method builtins.exec> (100%)
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Patch Test Results - Iteration 1, Attempt 1────────────────────────────────────────────────────────────────────────────────────────────────────
+
+🎯 BASELINE WORKLOAD PERFORMANCE:
+  Original Time:     3.307579s
+  Optimized Time:    2.123392s
+  Improvement:       +35.80%  ✅
+  Memory (before):   246.77 MB
+  Memory (after):    236.88 MB
+  Success Rate:      100.00%
+
+
+
+🧪 CURRENT WORKLOAD PERFORMANCE:
+  Original Time:     3.307579s
+  Optimized Time:    2.085413s
+  Improvement:       +36.95%  ✅
+  Memory (before):   246.77 MB
+  Memory (after):    236.84 MB
+  Success Rate:      100.00%
+
+
+
+✅ CORRECTNESS VERIFICATION:
+  Baseline Status:   ✅ PASS
+  Optimized Status:  ✅ PASS
+  Match:             ✅ YES
+  Details:           1.000000
+
+
+
+
+📊 OVERALL VERDICT:
+  ✅ PATCH ACCEPTED - All criteria met!
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Iteration 1 Summary────────────────────────────────────────────────────────────────────────────────────────────────────
+
+📊 ITERATION RESULTS:
+  Code Optimization:     ✅ SUCCESS
+  Workload Evolution:    ❌ FAILED
+  Baseline Improvement:  +35.80%
+  Completed:             2026-02-10 22:27:45
+
+
+
+====================================================================================================
+ITERATION 2/3====================================================================================================
+
+Started: 2026-02-10 22:27:46
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Profiling Results - Iteration 2, Attempt 1────────────────────────────────────────────────────────────────────────────────────────────────────
+=== TOP BOTTLENECKS (>5% time) ===
+1. <built-in method builtins.exec> - 2.15s (100.0%) [430 calls]
+   📁 ~
+2. <module> - 2.15s (100.0%) [1 calls]
+   📁 /var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle2_attempt1.py
+3. repeat - 1.83s (85.0%) [1 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+4. repeat - 1.83s (85.0%) [1 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+5. timeit - 1.83s (85.0%) [25 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+6. inner - 1.83s (85.0%) [25 calls]
+   📁 <timeit-src>
+7. workload - 1.83s (85.0%) [250 calls]
+   📁 /var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle2_attempt1.py
+8. <built-in method _operator.lt> - 0.89s (41.6%) [250 calls]
+   📁 ~
+9. _find_and_load - 0.31s (14.3%) [516 calls]
+   📁 <frozen importlib._bootstrap>
+10. _find_and_load_unlocked - 0.31s (14.3%) [516 calls]
+   📁 <frozen importlib._bootstrap>
+
+=== MEMORY ===
+Peak: 212.8 MB
+Top allocations:
+  1. 0.3 MB - inspect.py:909
+  2. 0.1 MB - functools.py:52
+
+=== COVERAGE ===
+Overall: 39832.0%
+Files executed: 1421
+
+=== OPTIMIZATION PRIORITY ===
+🎯 FOCUS HERE: 15 functions consume 755% of runtime
+   Start with: <built-in method builtins.exec> (100%)
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Patch Test Results - Iteration 2, Attempt 1────────────────────────────────────────────────────────────────────────────────────────────────────
+
+🎯 BASELINE WORKLOAD PERFORMANCE:
+  Original Time:     3.307579s
+  Optimized Time:    1.146482s
+  Improvement:       +65.34%  ✅
+  Memory (before):   246.77 MB
+  Memory (after):    227.26 MB
+  Success Rate:      100.00%
+
+
+
+🧪 CURRENT WORKLOAD PERFORMANCE:
+  Original Time:     2.085413s
+  Optimized Time:    1.147289s
+  Improvement:       +44.99%  ✅
+  Memory (before):   236.84 MB
+  Memory (after):    227.37 MB
+  Success Rate:      100.00%
+
+
+
+✅ CORRECTNESS VERIFICATION:
+  Baseline Status:   ✅ PASS
+  Optimized Status:  ✅ PASS
+  Match:             ✅ YES
+  Details:           1.000000
+
+
+
+
+📊 OVERALL VERDICT:
+  ✅ PATCH ACCEPTED - All criteria met!
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Iteration 2 Summary────────────────────────────────────────────────────────────────────────────────────────────────────
+
+📊 ITERATION RESULTS:
+  Code Optimization:     ✅ SUCCESS
+  Workload Evolution:    ❌ FAILED
+  Baseline Improvement:  +65.34%
+  Completed:             2026-02-10 22:42:21
+
+
+
+====================================================================================================
+ITERATION 3/3====================================================================================================
+
+Started: 2026-02-10 22:42:22
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Profiling Results - Iteration 3, Attempt 1────────────────────────────────────────────────────────────────────────────────────────────────────
+=== TOP BOTTLENECKS (>5% time) ===
+1. <built-in method builtins.exec> - 1.11s (100.0%) [430 calls]
+   📁 ~
+2. <module> - 1.11s (100.0%) [1 calls]
+   📁 /var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle3_attempt1.py
+3. repeat - 0.83s (74.8%) [1 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+4. repeat - 0.83s (74.8%) [1 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+5. timeit - 0.83s (74.8%) [25 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+6. inner - 0.83s (74.8%) [25 calls]
+   📁 <timeit-src>
+7. workload - 0.83s (74.8%) [250 calls]
+   📁 /var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle3_attempt1.py
+8. <built-in method builtins.getattr> - 0.40s (35.9%) [16,077 calls]
+   📁 ~
+9. _find_and_load - 0.27s (24.0%) [516 calls]
+   📁 <frozen importlib._bootstrap>
+10. _find_and_load_unlocked - 0.27s (24.0%) [516 calls]
+   📁 <frozen importlib._bootstrap>
+
+=== MEMORY ===
+Peak: 202.8 MB
+Top allocations:
+  1. 0.3 MB - inspect.py:909
+  2. 0.1 MB - functools.py:52
+
+=== COVERAGE ===
+Overall: 39854.0%
+Files executed: 1421
+
+=== OPTIMIZATION PRIORITY ===
+🎯 FOCUS HERE: 17 functions consume 770% of runtime
+   Start with: <built-in method builtins.exec> (100%)
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Patch Test Results - Iteration 3, Attempt 1────────────────────────────────────────────────────────────────────────────────────────────────────
+
+🎯 BASELINE WORKLOAD PERFORMANCE:
+  Original Time:     3.307579s
+  Optimized Time:    1.194668s
+  Improvement:       +63.88%  ✅
+  Memory (before):   246.77 MB
+  Memory (after):    227.29 MB
+  Success Rate:      100.00%
+
+
+
+🧪 CURRENT WORKLOAD PERFORMANCE:
+  Original Time:     1.147289s
+  Optimized Time:    1.208056s
+  Improvement:       -5.30%  ❌
+  Memory (before):   227.37 MB
+  Memory (after):    227.68 MB
+  Success Rate:      100.00%
+
+
+
+✅ CORRECTNESS VERIFICATION:
+  Baseline Status:   ✅ PASS
+  Optimized Status:  ✅ PASS
+  Match:             ✅ YES
+  Details:           1.000000
+
+
+
+
+📊 OVERALL VERDICT:
+  ❌ PATCH REJECTED - Failed criteria:
+     • Current workload improvement insufficient (need >5.0%, got -5.30%)
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Profiling Results - Iteration 3, Attempt 2────────────────────────────────────────────────────────────────────────────────────────────────────
+=== TOP BOTTLENECKS (>5% time) ===
+1. <built-in method builtins.exec> - 1.16s (100.0%) [430 calls]
+   📁 ~
+2. <module> - 1.16s (100.0%) [1 calls]
+   📁 /var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle3_attempt2.py
+3. repeat - 0.87s (75.1%) [1 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+4. repeat - 0.87s (75.1%) [1 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+5. timeit - 0.87s (75.1%) [25 calls]
+   📁 /opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/timeit.py
+6. inner - 0.87s (75.1%) [25 calls]
+   📁 <timeit-src>
+7. workload - 0.87s (75.1%) [250 calls]
+   📁 /var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle3_attempt2.py
+8. <built-in method builtins.getattr> - 0.42s (36.1%) [16,077 calls]
+   📁 ~
+9. _find_and_load - 0.27s (23.7%) [516 calls]
+   📁 <frozen importlib._bootstrap>
+10. _find_and_load_unlocked - 0.27s (23.7%) [516 calls]
+   📁 <frozen importlib._bootstrap>
+
+=== MEMORY ===
+Peak: 202.8 MB
+Top allocations:
+  1. 0.3 MB - inspect.py:909
+  2. 0.1 MB - functools.py:52
+
+=== COVERAGE ===
+Overall: 39854.0%
+Files executed: 1421
+
+=== OPTIMIZATION PRIORITY ===
+🎯 FOCUS HERE: 18 functions consume 772% of runtime
+   Start with: <built-in method builtins.exec> (100%)
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Patch Outcome - Iteration 3, Attempt 2────────────────────────────────────────────────────────────────────────────────────────────────────
+
+❌ PATCH GENERATION FAILED
+
+
+⚠️  Error Details:
+  No optimization generated
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Profiling Results - Iteration 3, Attempt 3────────────────────────────────────────────────────────────────────────────────────────────────────
+=== PROFILING ERRORS ===
+• FUNCTION: cProfile failed (code 1): Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/cProfile.py", line 195, in <module>
+    main()
+  File "/opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/cProfile.py", line 184, in main
+    runctx(code, globs, None, options.outfile, options.sort)
+  File "/opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/cProfile.py", line 21, in runctx
+    return _pyprofile._Utils(Profile).runctx(statement, globals, locals,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/profile.py", line 64, in runctx
+    prof.runctx(statement, globals, locals)
+  File "/opt/homebrew/Cellar/python@3.12/3.12.6/Frameworks/Python.framework/Versions/3.12/lib/python3.12/cProfile.py", line 102, in runctx
+    exec(cmd, globals, locals)
+  File "/var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle3_attempt3.py", line 1, in <module>
+    import pandas as pd
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/__init__.py", line 46, in <module>
+    from pandas.core.api import (
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/api.py", line 27, in <module>
+    from pandas.core.arrays import Categorical
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/arrays/__init__.py", line 9, in <module>
+    from pandas.core.arrays.datetimes import DatetimeArray
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/arrays/datetimes.py", line 68, in <module>
+    from pandas.core.arrays import datetimelike as dtl
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/arrays/datetimelike.py", line 1121
+    li = left.view("i8")
+SyntaxError: expected 'except' or 'finally' block
+
+• MEMORY: Memory profiling failed: Traceback (most recent call last):
+  File "/var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/memory_cycle3_attempt3.py", line 7, in <module>
+    import pandas as pd
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/__init__.py", line 46, in <module>
+    from pandas.core.api import (
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/api.py", line 27, in <module>
+    from pandas.core.arrays import Categorical
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/arrays/__init__.py", line 9, in <module>
+    from pandas.core.arrays.datetimes import DatetimeArray
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/arrays/datetimes.py", line 68, in <module>
+    from pandas.core.arrays import datetimelike as dtl
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/arrays/datetimelike.py", line 1121
+    li = left.view("i8")
+SyntaxError: expected 'except' or 'finally' block
+
+• COVERAGE: Coverage run failed: Traceback (most recent call last):
+  File "/var/folders/k6/yxhzngcs7zj28ryrhjl6fp9h0000gn/T/profiler_1hwhx0tb/cycle3_attempt3.py", line 1, in <module>
+    import pandas as pd
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/__init__.py", line 46, in <module>
+    from pandas.core.api import (
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/api.py", line 27, in <module>
+    from pandas.core.arrays import Categorical
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/arrays/__init__.py", line 9, in <module>
+    from pandas.core.arrays.datetimes import DatetimeArray
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/arrays/datetimes.py", line 68, in <module>
+    from pandas.core.arrays import datetimelike as dtl
+  File "/Users/jackluo/Documents/workspace/agent_performance_optimization/agentic_optimization/venv/lib/python3.12/site-packages/pandas/core/arrays/datetimelike.py", line 1121
+    li = left.view("i8")
+SyntaxError: expected 'except' or 'finally' block
+
+
+=== FUNCTION PROFILING ===
+❌ No data available
+
+=== MEMORY ===
+❌ No data available
+
+=== COVERAGE ===
+❌ No data available
+
+=== OPTIMIZATION PRIORITY ===
+⚠️  Limited profiling data - analyze workload code directly
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Patch Test Results - Iteration 3, Attempt 3────────────────────────────────────────────────────────────────────────────────────────────────────
+
+🎯 BASELINE WORKLOAD PERFORMANCE:
+  Original Time:     3.307579s
+  Optimized Time:    0.346533s
+  Improvement:       +89.52%  ✅
+  Memory (before):   246.77 MB
+  Memory (after):    107.19 MB
+  Success Rate:      100.00%
+
+
+
+🧪 CURRENT WORKLOAD PERFORMANCE:
+  Original Time:     1.147289s
+  Optimized Time:    0.330429s
+  Improvement:       +71.20%  ✅
+  Memory (before):   227.37 MB
+  Memory (after):    107.92 MB
+  Success Rate:      100.00%
+
+
+
+✅ CORRECTNESS VERIFICATION:
+  Baseline Status:   ✅ PASS
+  Optimized Status:  ✅ PASS
+  Match:             ✅ YES
+  Details:           1.000000
+
+
+
+
+📊 OVERALL VERDICT:
+  ✅ PATCH ACCEPTED - All criteria met!
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+New Workload Generation - Iteration 3, Attempt 1────────────────────────────────────────────────────────────────────────────────────────────────────
+
+📈 GENERATED WORKLOAD CODE:
+import timeit
+import statistics
+import pandas as pd
+import numpy as np
+
+def setup():
+    '''Create test data here'''
+    global arr1_base, arr1_shift, arr_pfx, arr_sfx, arr_rev, arr_nat, arr_even, arr_odd
+    global arr_tz_utc_base, arr_tz_utc_shift, arr_dst_base, arr_dst_shift
+    np.random.seed(42)
+
+    # Large naive datetime arrays (baseline operation target: DatetimeArray < DatetimeArray)
+    N1 = 8_000_000
+    base = pd.date_range("2000-01-01", periods=N1, freq="s")
+    arr1_base = base._data
+    arr1_shift = pd.date_range("2000-01-01 00:00:01", periods=N1, freq="s")._data
+
+    # Shifted slices (reuse memory-heavy base without duplicating data)
+    arr_pfx = arr1_base[:-1]   # length N1-1
+    arr_sfx = arr1_base[1:]    # length N1-1
+
+    # Reverse-ordered vs increasing (pathological comparison)
+    arr_rev = arr1_base[::-1]
+
+    # Insert NaT to create missing data stress
+    arr_nat = arr1_base.copy()
+    mask = np.random.random(len(arr_nat)) < 0.2  # 20% NaT
+    arr_nat[mask] = pd.NaT
+
+    # Strided, non-contiguous memory access
+    arr_even = arr1_base[0:-1:2]
+    arr_odd = arr1_shift[1::2]
+
+    # Timezone-aware UTC arrays
+    Ntz = 4_000_000
+    base_tz = pd.date_range("2010-01-01", periods=Ntz, freq="s", tz="UTC")
+    arr_tz_utc_base = base_tz._data
+    arr_tz_utc_shift = pd.date_range("2010-01-01 00:00:01+00:00", periods=Ntz, freq="s")._data
+
+    # DST-heavy timezone (America/New_York) across transition period
+    Nd = 1_500_000
+    base_dst = pd.date_range("2020-03-01", periods=Nd, freq="s", tz="America/New_York")
+    arr_dst_base = base_dst._data
+    arr_dst_shift = pd.date_range("2020-03-01 00:00:01", periods=Nd, freq="s", tz="America/New_York")._data
+
+def workload():
+    '''The actual work being tested'''
+    global arr1_base, arr1_shift, arr_pfx, arr_sfx, arr_rev, arr_nat, arr_even, arr_odd
+    global arr_tz_utc_base, arr_tz_utc_shift, arr_dst_base, arr_dst_shift
+
+    # SAME OPERATION as baseline: elementwise < on pandas DatetimeArray
+    arr1_base < arr1_shift        # large, straightforward increasing vs shifted
+    arr_pfx < arr_sfx             # adjacent comparisons (sliced, same data)
+    arr_rev < arr1_base           # reverse vs forward (worst-case ordering)
+    arr_nat < arr1_shift          # NaT-heavy comparisons
+    arr_even < arr_odd            # strided, non-contiguous comparisons
+    arr1_base < arr1_base         # all-equal path (all False)
+    arr_tz_utc_base < arr_tz_utc_shift  # tz-aware UTC arrays
+    arr_dst_base < arr_dst_shift        # tz-aware with DST complexity
+
+runtimes = timeit.repeat(workload, number=1, repeat=3, setup=setup)
+print(f"Mean: {statistics.mean(runtimes):.6f}")
+print(f"Std Dev: {statistics.stdev(runtimes):.6f}")
+
+
+
+🧪 WORKLOAD VALIDATION:
+  Optimized Code on Previous Workload:  0.330429s
+  Optimized Code on New Workload:       0.626323s
+  Performance Degradation:               +89.55%  ✅
+  Memory Impact:                         +537.17 MB
+
+
+  ✅ WORKLOAD ACCEPTED - Successfully harder!
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Iteration 3 Summary────────────────────────────────────────────────────────────────────────────────────────────────────
+
+📊 ITERATION RESULTS:
+  Code Optimization:     ✅ SUCCESS
+  Workload Evolution:    ❌ FAILED
+  Baseline Improvement:  +89.52%
+  Completed:             2026-02-10 23:08:44
+
+
+
+====================================================================================================
+FINAL OPTIMIZATION SUMMARY====================================================================================================
+
+🏆 OPTIMIZATION ACHIEVEMENTS:
+  Original Baseline Time:    3.307579s
+  Final Optimized Time:      0.346533s
+  TOTAL IMPROVEMENT:         +89.52%
+  Memory Reduction:          +139.58 MB
+
+
+
+📝 FINAL PATCH:
+  No final patch available
+
+
+
+📈 FINAL WORKLOAD:
+import timeit
+import statistics
+import pandas as pd
+import numpy as np
+
+def setup():
+    '''Create test data here'''
+    global arr1_base, arr1_shift, arr_pfx, arr_sfx, arr_rev, arr_nat, arr_even, arr_odd
+    global arr_tz_utc_base, arr_tz_utc_shift, arr_dst_base, arr_dst_shift
+    np.random.seed(42)
+
+    # Large naive datetime arrays (baseline operation target: DatetimeArray < DatetimeArray)
+    N1 = 8_000_000
+    base = pd.date_range("2000-01-01", periods=N1, freq="s")
+    arr1_base = base._data
+    arr1_shift = pd.date_range("2000-01-01 00:00:01", periods=N1, freq="s")._data
+
+    # Shifted slices (reuse memory-heavy base without duplicating data)
+    arr_pfx = arr1_base[:-1]   # length N1-1
+    arr_sfx = arr1_base[1:]    # length N1-1
+
+    # Reverse-ordered vs increasing (pathological comparison)
+    arr_rev = arr1_base[::-1]
+
+    # Insert NaT to create missing data stress
+    arr_nat = arr1_base.copy()
+    mask = np.random.random(len(arr_nat)) < 0.2  # 20% NaT
+    arr_nat[mask] = pd.NaT
+
+    # Strided, non-contiguous memory access
+    arr_even = arr1_base[0:-1:2]
+    arr_odd = arr1_shift[1::2]
+
+    # Timezone-aware UTC arrays
+    Ntz = 4_000_000
+    base_tz = pd.date_range("2010-01-01", periods=Ntz, freq="s", tz="UTC")
+    arr_tz_utc_base = base_tz._data
+    arr_tz_utc_shift = pd.date_range("2010-01-01 00:00:01+00:00", periods=Ntz, freq="s")._data
+
+    # DST-heavy timezone (America/New_York) across transition period
+    Nd = 1_500_000
+    base_dst = pd.date_range("2020-03-01", periods=Nd, freq="s", tz="America/New_York")
+    arr_dst_base = base_dst._data
+    arr_dst_shift = pd.date_range("2020-03-01 00:00:01", periods=Nd, freq="s", tz="America/New_York")._data
+
+def workload():
+    '''The actual work being tested'''
+    global arr1_base, arr1_shift, arr_pfx, arr_sfx, arr_rev, arr_nat, arr_even, arr_odd
+    global arr_tz_utc_base, arr_tz_utc_shift, arr_dst_base, arr_dst_shift
+
+    # SAME OPERATION as baseline: elementwise < on pandas DatetimeArray
+    arr1_base < arr1_shift        # large, straightforward increasing vs shifted
+    arr_pfx < arr_sfx             # adjacent comparisons (sliced, same data)
+    arr_rev < arr1_base           # reverse vs forward (worst-case ordering)
+    arr_nat < arr1_shift          # NaT-heavy comparisons
+    arr_even < arr_odd            # strided, non-contiguous comparisons
+    arr1_base < arr1_base         # all-equal path (all False)
+    arr_tz_utc_base < arr_tz_utc_shift  # tz-aware UTC arrays
+    arr_dst_base < arr_dst_shift        # tz-aware with DST complexity
+
+runtimes = timeit.repeat(workload, number=1, repeat=3, setup=setup)
+print(f"Mean: {statistics.mean(runtimes):.6f}")
+print(f"Std Dev: {statistics.stdev(runtimes):.6f}")
+
+
+
+🎯 FINAL PERFORMANCE:
+  Final Code on Baseline Workload:  0.346533s (+89.52%)
+  Final Code on Final Workload:     0.330429s
+
+
+
+⏱️  EXECUTION SUMMARY:
+  Start Time:    2026-02-10 22:12:36
+  End Time:      2026-02-10 23:08:45
+  Duration:      0:56:09.207523
+
+
+
+====================================================================================================
+END OF LOG====================================================================================================
+
