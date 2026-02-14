@@ -1,0 +1,17 @@
+[
+  {
+    "name": "diverse_1",
+    "description": "This workload tests the worst-case scenario by concatenating large and varied DataFrame objects to explore worst-case execution paths.",
+    "file": "diverse_1.py"
+  },
+  {
+    "name": "diverse_2",
+    "description": "This workload targets edge cases in merging operations of DataFrames, such as merging with conflicting indices or containing null values.",
+    "file": "diverse_2.py"
+  },
+  {
+    "name": "diverse_3",
+    "description": "This workload stresses the memory management by creating and processing large tiled arrays, targeting memory allocation and processing branches.",
+    "file": "diverse_3.py"
+  }
+]

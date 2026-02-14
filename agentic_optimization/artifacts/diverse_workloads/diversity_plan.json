@@ -1,0 +1,24 @@
+{
+  "num_workloads": 3,
+  "reasoning": "The codebase appears complex and extensive, with modules like reshape, indexers, and compatibility utilities. There are also several coverage gaps highlighted. Hence, a moderate number of workloads will be ideal to cover different paths and stress patterns.",
+  "workloads": [
+    {
+      "name": "diverse_1",
+      "pattern": "worst_case",
+      "target": "./core/reshape/concat.py",
+      "differentiation": "Focus on concatenating large and varied DataFrame objects to explore worst-case execution paths."
+    },
+    {
+      "name": "diverse_2",
+      "pattern": "edge_cases",
+      "target": "./core/reshape/merge.py",
+      "differentiation": "Target edge cases in merging operations, such as merging DataFrames with conflicting indices or null values."
+    },
+    {
+      "name": "diverse_3",
+      "pattern": "memory",
+      "target": "./core/reshape/tile.py",
+      "differentiation": "Stress test memory management by creating large tiled arrays, targeting memory allocation branches."
+    }
+  ]
+}
